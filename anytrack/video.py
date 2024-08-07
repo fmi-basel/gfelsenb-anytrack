@@ -1,6 +1,20 @@
 import os.path as op
 import cv2 as cv
 
+class CentroidTracks(object):
+    def __init__(self, nrows, ncols=5, colnames=['x', 'y']):
+        """
+        nrows: number of rows, i.e. timesteps
+        ncols: number of columns (default = 5 for OpenCV ellipse fitting)
+        """
+        pass
+
+    def __add__(self, other):
+        return self
+
+class ContourCollection(object):
+
+
 class Video(object):
     def __init__(self, file):
         self.name = op.basename(file).split('.')[0]
