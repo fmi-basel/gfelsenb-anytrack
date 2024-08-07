@@ -1,4 +1,4 @@
-# object-tracking
+# anytrack
 Pipeline to track individual objects in videos with static backgrounds
 
 Modules:
