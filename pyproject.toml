@@ -1,0 +1,18 @@
+[tool.poetry]
+name = "anytrack"
+version = "1.0.0"
+description = "Library for logging, processing, visualization and sharing of image-based tracking data of fruit flies written in Python."
+authors = ["Dennis Goldschmidt <dennis.goldschmidt@fmi.ch>"]
+license = "GPLv3"
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.12"
+setuptools = "^72.1.0"
+opencv-python = "^4.10.0.84"
+numpy = "^2.0.1"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
