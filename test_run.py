@@ -1,23 +1,12 @@
 import cv2 as cv
 import anytrack as track
-import anytrack.background as bg
+import anytrack.app as main
 
 
 if __name__ == "__main__":
     input_file = "/Users/golddenn/Desktop/temp-08062024162734.avi"
-    cap = cv.VideoCapture(input_file)
-    while cap.isOpened():
-        ret, frame = cap.read()
+    root = main.App(input_file)
+    ### background modelling
+    bg = root.model_bg()
 
-        # if frame is read correctly ret is True
-        if not ret:
-            print("Can't receive frame (stream end?). Exiting ...")
-            break
-        gray = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
-
-        cv.imshow('frame', gray)
-        if cv.waitKey(1) == ord('q'):
-            break
-
-    cap.release()
-    cv.destroyAllWindows()
+    #root.video_loop()
