@@ -12,8 +12,9 @@ class CentroidTracks(object):
     def __add__(self, other):
         return self
 
-class ContourCollection(object):
-
+class ContoursCollection(object):
+    def __init__(self):
+        pass
 
 class Video(object):
     def __init__(self, file):
@@ -66,11 +67,10 @@ class Video(object):
     def set_frame(self, i):
         self.cap.set(cv.CAP_PROP_POS_FRAMES, i)
 
-    def show(self, title, frame=None):
-        while True:
-            if frame is None:
-                cv.imshow(title, self.frame)
-            else:
-                cv.imshow(title, frame)
-            k = cv.waitKey(1) & 0xff # press ESC to exit
-            if k == 27 or cv.getWindowProperty(title, 0)<0: break
+    def show(self, title, frame=None, waitms=1):
+        if frame is None:
+            cv.imshow(title, self.frame)
+        else:
+            cv.imshow(title, frame)
+        k = cv.waitKey(waitms) & 0xff # press ESC to exit
+        return k

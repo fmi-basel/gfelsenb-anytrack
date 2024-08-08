@@ -4,15 +4,15 @@ import anytrack.app as main
 
 
 if __name__ == "__main__":
-    input_file = "/Users/golddenn/Desktop/temp-08062024162734.avi"
+    input_file = "/Users/golddenn/Desktop/temp-08062024170708_rightACV.avi"  #"/Users/golddenn/Desktop/temp-08062024162734.avi"
     root = main.App(input_file)
     video = root.video
     ### background modelling
     bg = root.model_bg(video)
     ### contours collection
-    cnts = root.collect_contours(bg)
+    cnts = root.collect_contours(video=video, bg=bg)
     ### generate tracks from contours
-    track = root.generate_tracks(cnts)
+    #track = root.generate_tracks(cnts)
     ### add overlays
 
     #root.video_loop()
