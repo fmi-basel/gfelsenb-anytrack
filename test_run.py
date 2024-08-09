@@ -12,7 +12,7 @@ if __name__ == "__main__":
     cnts = root.collect_contours(video=video, bg=bg)
     ### generate tracks from contours
     tracks = root.generate_tracks(cnts)
-    print(tracks.to_dataframe())
+    ### make DataFrame from tracks
+    df = tracks.to_dataframe()
     ### add overlays
-    
     #root.video_loop()

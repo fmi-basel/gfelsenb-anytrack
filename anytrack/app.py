@@ -27,7 +27,7 @@ class App(object):
         self.video = Video(file)
         self.displayname = 'Preview (anytrack v1.0.0)'
 
-    def collect_contours(self, video=None, bg=None, verbose=True, onlynframes=None):
+    def collect_contours(self, video=None, bg=None, verbose=True, onlynframes=None, display=False):
         if video is None: video = self.video
         if bg is None: bg = self.bg
         if onlynframes is not None: video.nframes = onlynframes 
@@ -53,7 +53,7 @@ class App(object):
                 pos = np.array(e[0]).astype(np.uint32)
                 cv.circle(colorimg, (pos[0], pos[1]), 2, (0,255.,0.), 1)
             ### display video
-            if verbose:
+            if display:
                 title = f'{video.name}'
                 k = video.show(title, frame=colorimg) ## waitms = milliseconds of waiting (0 = forever)
                 if k == 27 or cv.getWindowProperty(title, 0)<0: break
@@ -77,7 +77,7 @@ class App(object):
                 tracks.angle[i] = cc[2]
         return tracks
 
-    def model_bg(self, video, bgframes=90, niters=0, ghost_thr=[10, 30], verbose=True):
+    def model_bg(self, video, bgframes=90, niters=0, ghost_thr=[10, 30], verbose=True, display=False):
         """
         Background Modelling using Iterative Average and Ghost Subtraction
 
@@ -97,7 +97,7 @@ class App(object):
             frames.append(video.read())
         avg_img = np.mean(frames, axis=0)
         avg_img = avg_img.astype(np.uint8)
-        if verbose: video.show('Background model', frame=avg_img, waitms=0)
+        if display: video.show('Background model', frame=avg_img, waitms=0)
 
         ### iterative ghost subtraction
         for j in range(niters):
