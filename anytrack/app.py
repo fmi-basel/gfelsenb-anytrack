@@ -27,9 +27,11 @@ class App(object):
         self.video = Video(file)
         self.displayname = 'Preview (anytrack v1.0.0)'
 
-    def collect_contours(self, video=None, bg=None, verbose=True):
+    def collect_contours(self, video=None, bg=None, verbose=True, onlynframes=None):
         if video is None: video = self.video
         if bg is None: bg = self.bg
+        if onlynframes is not None: video.nframes = onlynframes 
+        cnts = ContoursCollection() ### container for all contours and centroids
         ### iterate through video
         for i in tqdm(range(video.nframes), desc='Tracking on frame:', disable=(not verbose)):
             frame = video.read()
@@ -43,17 +45,37 @@ class App(object):
             contours = sorted(contours, key=cv.contourArea, reverse=True) ### largest first
             ### draw on top
             cv.drawContours(colorimg, contours, 0, (255.,0.,255.), 1)
-            if len(contours)>0:
-                e = cv.fitEllipse(contours[0])
+            ### get centroids
+            centroids = [cv.fitEllipse(cnt) for cnt in contours]
+            if len(centroids) > 0:
+                e = centroids[0]
                 cv.ellipse(colorimg, e, (0,255.,0.))
                 pos = np.array(e[0]).astype(np.uint32)
                 cv.circle(colorimg, (pos[0], pos[1]), 2, (0,255.,0.), 1)
-            title = f'{video.name}'
-            k = video.show(title, frame=colorimg) ## waitms = milliseconds of waiting (0 = forever)
-            if k == 27 or cv.getWindowProperty(title, 0)<0: break
+            ### display video
+            if verbose:
+                title = f'{video.name}'
+                k = video.show(title, frame=colorimg) ## waitms = milliseconds of waiting (0 = forever)
+                if k == 27 or cv.getWindowProperty(title, 0)<0: break
+            ### adding to collection
+            cnts.add(video.get_frame_index(), contours, centroids)
+        return cnts
 
-    def generate_tracks(self):
-        pass
+    def generate_tracks(self, cnts):
+        """
+        Current implementation only takes largest contour into account.
+        """
+        tracks = CentroidTracks(len(cnts))
+        for i, coid in enumerate(cnts):
+            tracks.frame[i] = cnts.frameindex[i]
+            if len(coid) > 0: ### only if contour exists
+                cc = coid[0] ### largest contour
+                tracks.x[i] = cc[0][0]
+                tracks.y[i] = cc[0][1]
+                tracks.major[i] = cc[1][1]
+                tracks.minor[i] = cc[1][0]
+                tracks.angle[i] = cc[2]
+        return tracks
 
     def model_bg(self, video, bgframes=90, niters=0, ghost_thr=[10, 30], verbose=True):
         """
@@ -76,11 +98,6 @@ class App(object):
         avg_img = np.mean(frames, axis=0)
         avg_img = avg_img.astype(np.uint8)
         if verbose: video.show('Background model', frame=avg_img, waitms=0)
-
-        #bgfolder = op.join(video.outf, 'bg', f'{video.name}')
-        #os.makedirs(bgfolder, exist_ok=True)
-        #bgfile = op.join(bgfolder, f'{video.name}_0.png')
-        #cv2.imwrite(bgfile, avg_img, [cv2.IMWRITE_PNG_COMPRESSION, 0])
 
         ### iterative ghost subtraction
         for j in range(niters):
@@ -109,14 +126,9 @@ class App(object):
             avg_img[:,:,1] = np.clip(np.divide(newbg[:,:,0],bgcount[:,:,0]), 0, 255)
             avg_img[:,:,2] = np.clip(np.divide(newbg[:,:,0],bgcount[:,:,0]), 0, 255)
             avg_img = avg_img.astype(np.uint8)
-
-            #bgfolder = op.join(video.outf, 'bg', f'{video.name}')
-            #bgfile = op.join(bgfolder, f'{video.name}_{j+1}.png')
-            #cv2.imwrite(bgfile, avg_img, [cv2.IMWRITE_PNG_COMPRESSION, 0])
         bg = avg_img.astype(np.uint8)
-        #bgfolder = op.join(video.outf, 'bg')
-        #bgfile = op.join(bgfolder, f'{video.name}_bg.png')
-        #cv2.imwrite(bgfile, avg_img, [cv2.IMWRITE_PNG_COMPRESSION, 0])
+        video.reset()
+        video.close_all()
         return bg
 
     def video_loop(self):
