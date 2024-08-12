@@ -1,10 +1,24 @@
 # anytrack
-Pipeline to track individual objects in videos with static backgrounds
+Pipeline to track individual objects in videos with static backgrounds.
 
-Modules:
-1. Adaptive Background Modelling
-2. Background Subtraction
-3. Contour collection and validation
-4. Tracks modelling
-5. Data IO
-6. GUI
+## Getting started
+
+### Installation
+
+Install anytrack using the repository setup file. First, clone the repository
+```bash
+git clone https://github.com/Felsenberg-lab/anytrack.git && cd anytrack
+```
+Install Python 3.12 using Anaconda
+```bash
+conda env create -n anytrack -f tracking_environment.yml
+```
+Now, install pipx as described on the [website](https://pipx.pypa.io/stable/installation/). Next, install poetry 
+```bash
+pipx install poetry
+```
+Finally, install required pip packages via Poetry and install this package to your system
+```bash
+poetry install && poetry run python setup.py install --user
+```
+This finishes the installation process for this package.
