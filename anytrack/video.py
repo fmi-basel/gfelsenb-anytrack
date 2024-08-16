@@ -51,6 +51,9 @@ class Video(object):
         self.fps = int(self.cap.get(cv.CAP_PROP_FPS))
         self.frame = None
 
+    def add_overlay(self, key, value):
+        pass
+
     def close(self, title):
         self.cap.release()
         cv.destroyWindow(title)
@@ -69,6 +72,7 @@ class Video(object):
             # if frame is read correctly ret is True
             if frame is None:
                 self.reset()
+                break
             gray = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
 
             cv.imshow(title, gray)

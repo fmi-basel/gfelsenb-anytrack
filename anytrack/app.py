@@ -50,8 +50,11 @@ class App(object):
             if len(centroids) > 0:
                 e = centroids[0]
                 cv.ellipse(colorimg, e, (0,255.,0.))
-                pos = np.array(e[0]).astype(np.uint32)
-                cv.circle(colorimg, (pos[0], pos[1]), 2, (0,255.,0.), 1)
+                pos = np.array(e[0]).astype(int)
+                try:
+                    cv.circle(colorimg, (pos[0], pos[1]), 2, (0,255,0), 1)
+                except cv.error:
+                    print(pos, e)
             ### display video
             if display:
                 title = f'{video.name}'
@@ -59,6 +62,7 @@ class App(object):
                 if k == 27 or cv.getWindowProperty(title, 0)<0: break
             ### adding to collection
             cnts.add(video.get_frame_index(), contours, centroids)
+        video.reset()
         return cnts
 
     def generate_tracks(self, cnts):
@@ -131,5 +135,7 @@ class App(object):
         video.close_all()
         return bg
 
-    def video_loop(self):
+    def video_loop(self, overlay={}):
+        for k,v in overlay.items():
+            self.video.add_overlay(k, v)
         self.video.loop(self.displayname)

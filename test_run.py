@@ -15,4 +15,4 @@ if __name__ == "__main__":
     ### make DataFrame from tracks
     df = tracks.to_dataframe()
     ### add overlays
-    #root.video_loop()
+    root.video_loop(overlay=dict(tracks=tracks))
