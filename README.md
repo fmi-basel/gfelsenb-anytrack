@@ -1,4 +1,4 @@
-# anytrack
+# gfelsenb-anytrack
 Pipeline to track individual objects in videos with static backgrounds.
 
 ## Getting started
