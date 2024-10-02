@@ -3,6 +3,7 @@ import os.path as op
 import cv2 as cv
 import numpy as np
 import pandas as pd
+import sys
 
 class CentroidTracks():
     def __init__(self, nrows, colnames=['frame', 'x', 'y', 'angle', 'major', 'minor']):
@@ -19,7 +20,7 @@ class CentroidTracks():
         data = np.stack([self.__dict__[col] for col in self.columns], axis=1)
         df = pd.DataFrame(data=data, columns=self.columns)
         # force frame index to be integer
-        df['frame'] = df['frame'].astype(int) 
+        df['frame'] = df['frame'].astype(int)
         return df
 
 class ContoursCollection(Sequence):
@@ -50,14 +51,15 @@ class Video(object):
         self.nframes = int(self.cap.get(cv.CAP_PROP_FRAME_COUNT))
         self.fps = int(self.cap.get(cv.CAP_PROP_FPS))
         self.frame = None
+        self.overlays = {}
 
     def add_overlay(self, key, value):
-        pass
+        self.overlays.update({key: value})
 
     def close(self, title):
         self.cap.release()
         cv.destroyWindow(title)
-    
+
     def close_all(self):
         cv.destroyAllWindows()
 
@@ -68,14 +70,40 @@ class Video(object):
         cap = self.cap ## local ref
         while cap.isOpened():
             frame = self.read()
-
+            ii = self.get_frame_index()
             # if frame is read correctly ret is True
             if frame is None:
                 self.reset()
                 break
-            gray = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
+            #gray = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
 
-            cv.imshow(title, gray)
+            ### overlays drawing
+            colorimg = frame.copy()
+            for k,v in self.overlays.items():
+                if k == 'tracks':
+                    trace_len = 10 * self.fps
+                    x = np.round(v.x[ii]).astype(int)
+                    y = np.round(v.y[ii]).astype(int)
+                    hx = v.x[ii] +
+                    xt = v.x[max(ii-trace_len,0):ii]
+                    yt = v.y[max(ii-trace_len,0):ii]
+                    trace = np.vstack([xt,yt]).T
+                    pts = np.array(trace,np.int32).reshape((-1, 1, 2))
+                    ### drawing funcs
+                    cv.circle(colorimg, (x,y), 2, (0,255,0), 1)
+                    cv.polylines(colorimg, [pts], False, (0,255,0), 1)
+            cv.putText( colorimg,
+                        f'frame: {self.get_frame_index()}',
+                        (10,20),
+                        cv.FONT_HERSHEY_SIMPLEX,
+                        0.75,
+                        (255,0,255),
+                        1,
+                        cv.LINE_AA,
+            )
+
+
+            cv.imshow(title, colorimg)
             k = cv.waitKey(1)
             if k == 27:
                 break
@@ -98,6 +126,9 @@ class Video(object):
 
     def set_frame(self, i):
         self.cap.set(cv.CAP_PROP_POS_FRAMES, i)
+
+    def set_scale(self, val):
+        self.px_per_mm = val
 
     def show(self, title, frame=None, waitms=1):
         if frame is None:

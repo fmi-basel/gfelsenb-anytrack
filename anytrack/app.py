@@ -1,6 +1,7 @@
 import cv2 as cv
 import numpy as np
 from tqdm.auto import tqdm
+import os.path as op
 
 from anytrack.video import  CentroidTracks, ContoursCollection, Video
 
@@ -23,14 +24,15 @@ def get_contours(bg, frame, mask=None, threshold_tracking=30):
     return contours, diff, subtr
 
 class App(object):
-    def __init__(self, file):
-        self.video = Video(file)
+    def __init__(self, _files):
+        self.path = op.dirname(_files[0])
+        self.videos = [Video(file) for file in _files]
         self.displayname = 'Preview (anytrack v1.0.0)'
 
     def collect_contours(self, video=None, bg=None, verbose=True, onlynframes=None, display=False):
         if video is None: video = self.video
         if bg is None: bg = self.bg
-        if onlynframes is not None: video.nframes = onlynframes 
+        if onlynframes is not None: video.nframes = onlynframes
         cnts = ContoursCollection() ### container for all contours and centroids
         ### iterate through video
         for i in tqdm(range(video.nframes), desc='Tracking on frame:', disable=(not verbose)):
@@ -79,6 +81,16 @@ class App(object):
                 tracks.major[i] = cc[1][1]
                 tracks.minor[i] = cc[1][0]
                 tracks.angle[i] = cc[2]
+
+        ### post calculations (these arrays need to be defined first in tracks class)
+        # Convert angle to radians and correct it
+        tracks.angle_corr = (np.pi / 2) - np.deg2rad(tracks.angle)
+        # Calculate extreme points
+        tracks.ax = tracks.x + tracks.major/2. * np.cos(tracks.angle_corr)
+        tracks.ay = tracks.y - tracks.major/2. * np.sin(tracks.angle_corr)
+        tracks.bx = tracks.x - tracks.major/2. * np.cos(tracks.angle_corr)
+        tracks.by = tracks.y + tracks.major/2. * np.sin(tracks.angle_corr)
+
         return tracks
 
     def model_bg(self, video, bgframes=90, niters=0, ghost_thr=[10, 30], verbose=True, display=False):
@@ -135,7 +147,7 @@ class App(object):
         video.close_all()
         return bg
 
-    def video_loop(self, overlay={}):
+    def video_loop(self, video, overlay={}):
         for k,v in overlay.items():
-            self.video.add_overlay(k, v)
-        self.video.loop(self.displayname)
+            video.add_overlay(k, v)
+        video.loop(self.displayname)

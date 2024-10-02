@@ -5,4 +5,4 @@
 eval "$(conda shell.bash hook)"
 conda activate tracking
 poetry run python setup.py install --user
-poetry run python test_run.py
+poetry run python run.py
