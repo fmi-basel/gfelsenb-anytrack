@@ -84,7 +84,7 @@ class Video(object):
                     trace_len = 10 * self.fps
                     x = np.round(v.x[ii]).astype(int)
                     y = np.round(v.y[ii]).astype(int)
-                    hx = v.x[ii] +
+                    #hx = v.x[ii] +
                     xt = v.x[max(ii-trace_len,0):ii]
                     yt = v.y[max(ii-trace_len,0):ii]
                     trace = np.vstack([xt,yt]).T
