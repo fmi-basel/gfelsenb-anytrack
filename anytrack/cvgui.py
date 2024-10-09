@@ -2,22 +2,27 @@ import cv2
 import numpy as np
 
 class GUI:
-    def __init__(self, image):
+    def __init__(self, image, title='preview', mode='scale'):
         self.image = image
         self.image_copy = image.copy()
         self.points = []
         self.line_length = 0
-        self.window_name = "Draw a line with 1 cm length."
+        self.window_name = title
+        self.mode = mode
+        self.dragged = False
 
         # Initialize OpenCV window and set the mouse callback
         cv2.namedWindow(self.window_name)
-        cv2.setMouseCallback(self.window_name, self.draw_line_and_text)
+        if self.mode == 'scale':
+            cv2.setMouseCallback(self.window_name, self.draw_lines)
+        elif self.mode == 'points':
+            cv2.setMouseCallback(self.window_name, self.draw_points)
 
     def calculate_distance(self, pt1, pt2):
         """Calculate the Euclidean distance between two points in pixel space."""
         return int(np.sqrt((pt2[0] - pt1[0])**2 + (pt2[1] - pt1[1])**2))
 
-    def draw_line_and_text(self, event, x, y, flags, param):
+    def draw_lines(self, event, x, y, flags, param):
         """Handle mouse events and draw line with text when two points are selected."""
         if event == cv2.EVENT_LBUTTONDOWN:
             self.points.append((x, y))
@@ -38,8 +43,32 @@ class GUI:
                 # Update the display
                 cv2.imshow(self.window_name, self.image_copy)
 
-    def reset_line(self):
-        """Reset the line and clear the points."""
+    def draw_points(self, event, x, y, flags, param):
+        """Handle mouse events and draw points with text."""
+        if event == cv2.EVENT_LBUTTONDOWN:
+            print('down')
+            cv2.circle(self.image_copy, (x,y), 3, (255, 255, 255), 1)
+            # Update the display
+            cv2.imshow(self.window_name, self.image_copy)
+            self.dragged = True
+        if event == cv2.EVENT_MOUSEMOVE and self.dragged:
+            self.image_copy = self.image.copy()  # Reset the image
+            cv2.circle(self.image_copy, (x,y), 3, (255, 255, 255), 1)
+            # Update the display
+            cv2.imshow(self.window_name, self.image_copy)
+        if event == cv2.EVENT_LBUTTONUP:
+            print('up')
+            self.dragged = False
+            self.points.append((x,y))
+            # Update the display
+            cv2.imshow(self.window_name, self.image_copy)
+        for i, pt in enumerate(self.points):
+            cv2.circle(self.image_copy, pt, 3, (255, 255, 0), 1)
+            cv2.putText(self.image_copy, f"odor {i+1}: ({pt[0]},{pt[1]})", (10, i*30+30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+
+
+    def reset(self):
+        """Reset objects."""
         self.points = []
         self.line_length = 0
         self.image_copy = self.image.copy()  # Reset the image
@@ -59,11 +88,14 @@ class GUI:
                 break
             elif key == 8 or key == 127:  # DEL or Backspace key
                 # Reset the line and clear the image
-                self.reset_line()
+                self.reset()
 
         # Close the window and return the line length
         cv2.destroyAllWindows()
-        return self.line_length
+        if self.mode == 'scale':
+            return self.line_length
+        elif self.mode == 'points':
+            return self.points
 
 # Example usage:
 if __name__ == "__main__":

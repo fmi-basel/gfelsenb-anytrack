@@ -6,10 +6,22 @@ import pandas as pd
 import sys
 
 class CentroidTracks():
-    def __init__(self, nrows, colnames=['frame', 'x', 'y', 'angle', 'major', 'minor']):
+    def __init__(self, nrows, colnames=['frame',
+                                        'x',
+                                        'y',
+                                        'angle',
+                                        'major',
+                                        'minor',
+                                        'angle_corr',
+                                        'ax',
+                                        'ay',
+                                        'bx',
+                                        'by',
+    ]):
         """
         nrows: number of rows, i.e. timesteps
-        colnames: column names (default = 1 frame index + 5 for OpenCV ellipse fitting)
+        colnames: column names (default = 1 frame index + 5 for OpenCV ellipse fitting + 5 from processing)
+        TODO: move default columns to definitions class
         """
         self.ncols = len(colnames)
         self.columns = colnames
@@ -84,14 +96,16 @@ class Video(object):
                     trace_len = 10 * self.fps
                     x = np.round(v.x[ii]).astype(int)
                     y = np.round(v.y[ii]).astype(int)
-                    #hx = v.x[ii] +
-                    xt = v.x[max(ii-trace_len,0):ii]
-                    yt = v.y[max(ii-trace_len,0):ii]
+                    hx = np.round(v.ax[ii]).astype(int)
+                    hy = np.round(v.ay[ii]).astype(int)
+                    xt = v.ax[max(ii-trace_len,0):ii]
+                    yt = v.ay[max(ii-trace_len,0):ii]
                     trace = np.vstack([xt,yt]).T
                     pts = np.array(trace,np.int32).reshape((-1, 1, 2))
                     ### drawing funcs
                     cv.circle(colorimg, (x,y), 2, (0,255,0), 1)
-                    cv.polylines(colorimg, [pts], False, (0,255,0), 1)
+                    cv.circle(colorimg, (hx,hy), 2, (255,255,255), 1)
+                    cv.polylines(colorimg, [pts], False, (255,255,255), 1)
             cv.putText( colorimg,
                         f'frame: {self.get_frame_index()}',
                         (10,20),
