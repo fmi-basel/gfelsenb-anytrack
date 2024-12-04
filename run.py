@@ -29,16 +29,16 @@ if __name__ == "__main__":
     for i, video in enumerate(root.videos):
         metadata[video.name] = {}
         ### background modelling
-        bg = root.model_bg(video)
+        video.bg = root.model_bg(video)
         ### GUI for scale
         if not batch or i == 0:
-            gui = GUI(bg, title='Draw a line with 1 cm length.', mode='scale')
+            gui = GUI(video.bg, title='Draw a line with 1 cm length.', mode='scale')
             scale = gui.loop()/10. ## TODO: currently length is fixed to 10 mm
         video.set_scale(scale)
         metadata[video.name]['scale'] =  scale
         del gui
         ### GUI for getting odor port positions
-        gui = GUI(bg, title='Select odor port positions.', mode='points')
+        gui = GUI(video.bg, title='Select odor port positions.', mode='points')
         odor_ports_pos = gui.loop() ## TODO: generalize
         metadata[video.name]['odor_ports'] =  odor_ports_pos
 
@@ -48,7 +48,7 @@ if __name__ == "__main__":
         ### contours collection
         # TODO:
             # 1. head detection
-        cnts = root.collect_contours(video=video, bg=bg)
+        cnts = root.collect_contours(video=video, bg=video.bg, debug=True)
         ### generate tracks from contours
         # TODO:
             # 1. correct angle

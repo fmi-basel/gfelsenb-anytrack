@@ -29,7 +29,7 @@ class App(object):
         self.videos = [Video(file) for file in _files]
         self.displayname = 'Preview (anytrack v1.0.0)'
 
-    def collect_contours(self, video=None, bg=None, verbose=True, onlynframes=None, display=False):
+    def collect_contours(self, video=None, bg=None, verbose=True, onlynframes=None, display=False, debug=False):
         if video is None: video = self.video
         if bg is None: bg = self.bg
         if onlynframes is not None: video.nframes = onlynframes
@@ -58,7 +58,7 @@ class App(object):
                 except cv.error:
                     print(pos, e)
             ### display video
-            if display:
+            if display or debug:
                 title = f'{video.name}'
                 k = video.show(title, frame=colorimg) ## waitms = milliseconds of waiting (0 = forever)
                 if k == 27 or cv.getWindowProperty(title, 0)<0: break
