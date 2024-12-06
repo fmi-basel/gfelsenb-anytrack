@@ -1,9 +1,12 @@
 import cv2 as cv
 import numpy as np
+import pandas as pd
 from tqdm.auto import tqdm
 import os.path as op
+import sys
 
 from anytrack.video import  CentroidTracks, ContoursCollection, Video
+from anytrack.kinematics import get_translational_speed
 
 def get_contours(bg, frame, mask=None, threshold_tracking=30):
     """
@@ -28,6 +31,16 @@ class App(object):
         self.path = op.dirname(_files[0])
         self.videos = [Video(file) for file in _files]
         self.displayname = 'Preview (anytrack v1.0.0)'
+
+    def analyze_kinematics(self, df, scale=None, fps=30):
+        dfs = []
+        for fly in df.video.unique():
+            flydf = df.loc[df.video == fly,:]
+            body_speed = get_translational_speed(data=flydf.loc[:,['x', 'y']],dt=np.divide(1., fps), scale=scale)
+            kine_df = pd.DataFrame({'body_speed': body_speed})
+            dfs.append(kine_df)
+        outdf = pd.concat(dfs)
+        return outdf
 
     def collect_contours(self, video=None, bg=None, verbose=True, onlynframes=None, display=False, debug=False):
         if video is None: video = self.video

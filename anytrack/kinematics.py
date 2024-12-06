@@ -16,7 +16,7 @@ def get_angle(_data_origin, _data_tip):
     return np.arctan2(dy,dx)
 
 # Calculate walking velocities
-def get_translational_speed(data, dt=1):
+def get_translational_speed(data, dt=1, scale=1):
     """
     Returns translational speed from x,y dataframe and dt vector
     """
@@ -25,7 +25,7 @@ def get_translational_speed(data, dt=1):
     x,y = arr[:,0],arr[:,1]
     ### linear speed is the squareroot of squared displacements in x and y (Pythagoras' theorem) divided by dt
     dr = np.hypot( np.diff(x), np.diff(y) )
-    dr = np.append(dr[0], dr)
+    dr = np.divide(np.append(dr[0], dr), scale)
     speed = np.divide(dr,_dt)
     ### filter speeds once
     speed = savgolfilt(speed)
