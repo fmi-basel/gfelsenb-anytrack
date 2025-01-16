@@ -65,9 +65,11 @@ if __name__ == "__main__":
     ### this is the automated processing
     dfs = []
     datafilename = op.join(outdirname, f'tracks.csv')
-    overwrite = messagebox.askyesno('Data file found.', 'Do you want to overwrite existing data?')
+    flag_processing = True
+    if op.exists(datafilename):
+        flag_processing = messagebox.askyesno('Data file found.', 'Do you want to overwrite existing data?')
     tkroot.update()
-    if op.exists(datafilename) and overwrite:
+    if flag_processing:
         for video in root.videos:
             ### contours collection
             # TODO:
