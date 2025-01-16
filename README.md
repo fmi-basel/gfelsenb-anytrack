@@ -7,7 +7,7 @@ Pipeline to track individual objects in videos with static backgrounds. test
 
 1. Install anytrack using the repository setup file. First, clone the repository
   ```bash
-  git clone https://github.com/Felsenberg-lab/anytrack.git && cd anytrack
+  git clone https://github.com/fmi-basel/gfelsenb-anytrack.git && cd anytrack
   ```
 2. Install Python 3.12 using Anaconda
   ```bash
