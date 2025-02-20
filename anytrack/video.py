@@ -103,9 +103,9 @@ class Video(object):
                     trace = np.vstack([xt,yt]).T
                     pts = np.array(trace,np.int32).reshape((-1, 1, 2))
                     ### drawing funcs
-                    cv.circle(colorimg, (x,y), 2, (0,255,0), 1)
-                    cv.circle(colorimg, (hx,hy), 2, (255,255,255), 1)
-                    cv.polylines(colorimg, [pts], False, (255,255,255), 1)
+                    cv.circle(colorimg, (x,y), 2, (0,255,0), 2)
+                    cv.circle(colorimg, (hx,hy), 2, (255,255,255), 2)
+                    cv.polylines(colorimg, [pts], False, (51,74,227), 2)
             cv.putText( colorimg,
                         f'frame: {self.get_frame_index()}',
                         (10,20),
