@@ -1,6 +1,7 @@
 import cv2 as cv
 import anytrack.app as main
 from anytrack.cvgui import GUI
+from anytrack.argsparse import parse_args
 import pandas as pd
 import os
 import os.path as op
@@ -25,6 +26,8 @@ def savemetadata(data, filepath=None):
         toml.dump(data, f)
 
 if __name__ == "__main__":
+    args = parse_args()
+
     input_files = open_video_files()
     root = main.App(input_files)
     ### check output
@@ -98,7 +101,8 @@ if __name__ == "__main__":
             dfs.append(flydf)
 
             ### add overlays
-            #root.video_loop(video, overlay=dict(tracks=tracks))
+            if args.show_tracks:
+                root.video_loop(video, overlay=dict(tracks=tracks))
         ### save data and metadata
         pd.concat(dfs).to_csv(datafilename)
         savemetadata(metadata, filepath=metafilename)
