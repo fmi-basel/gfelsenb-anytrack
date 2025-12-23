@@ -20,3 +20,4 @@ anytrack.egg-info/top_level.txt
 anytrack/gui/__init__.py
 anytrack/gui/app.py
 anytrack/gui/progress.py
+tests/test_performance.py

@@ -44,17 +44,31 @@ class Kalman2D:
         s = self.kf.correct(m)
         return float(s[0, 0]), float(s[1, 0])
 
-def _threshold_fg(diff: np.ndarray, cfg: AnyTrackConfig) -> np.ndarray:
+def _build_morph_kernels(cfg: AnyTrackConfig) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+    """Pre-allocate morphology structuring elements."""
+    kernel_open = None
+    kernel_close = None
+    if cfg.morph_open > 0:
+        kernel_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (cfg.morph_open, cfg.morph_open))
+    if cfg.morph_close > 0:
+        kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (cfg.morph_close, cfg.morph_close))
+    return kernel_open, kernel_close
+
+
+def _threshold_fg(
+    diff: np.ndarray,
+    cfg: AnyTrackConfig,
+    kernel_open: Optional[np.ndarray] = None,
+    kernel_close: Optional[np.ndarray] = None,
+) -> np.ndarray:
     if cfg.thr_method == "fixed":
         _, bw = cv2.threshold(diff, int(cfg.thr_fixed), 255, cv2.THRESH_BINARY)
     else:
         _, bw = cv2.threshold(diff, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    if cfg.morph_open > 0:
-        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (cfg.morph_open, cfg.morph_open))
-        bw = cv2.morphologyEx(bw, cv2.MORPH_OPEN, k)
-    if cfg.morph_close > 0:
-        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (cfg.morph_close, cfg.morph_close))
-        bw = cv2.morphologyEx(bw, cv2.MORPH_CLOSE, k)
+    if kernel_open is not None:
+        bw = cv2.morphologyEx(bw, cv2.MORPH_OPEN, kernel_open)
+    if kernel_close is not None:
+        bw = cv2.morphologyEx(bw, cv2.MORPH_CLOSE, kernel_close)
     return bw
 
 def _extract_ellipses(
@@ -62,11 +76,13 @@ def _extract_ellipses(
     bg_roi_gray: np.ndarray,
     cfg: AnyTrackConfig,
     mask: Optional[np.ndarray] = None,
+    kernel_open: Optional[np.ndarray] = None,
+    kernel_close: Optional[np.ndarray] = None,
 ) -> List[EllipseCandidate]:
     diff = cv2.absdiff(roi_gray, bg_roi_gray)
     if mask is not None:
         diff = cv2.bitwise_and(diff, diff, mask=mask)
-    bw = _threshold_fg(diff, cfg)
+    bw = _threshold_fg(diff, cfg, kernel_open, kernel_close)
 
     cnts, _ = cv2.findContours(bw, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     cand: List[EllipseCandidate] = []
@@ -154,33 +170,66 @@ def track_video(
     except Exception:
         pass
 
-    for i, (_, row) in enumerate(timing.iterrows()):
+    # === PHASE 1 OPTIMIZATIONS ===
+    # Pre-allocate morphology kernels (avoid creating per-frame)
+    kernel_open, kernel_close = _build_morph_kernels(cfg)
+
+    # Pre-compute ROI masks and background crops (they don't change per-frame)
+    roi_precomputed: Dict[str, dict] = {}
+    for roi in video.rois:
+        x0 = int(max(0, roi.cx - roi.r))
+        y0 = int(max(0, roi.cy - roi.r))
+        x1 = int(roi.cx + roi.r)
+        y1 = int(roi.cy + roi.r)
+        bg_roi = bg[y0:y1, x0:x1]
+        # Pre-compute mask for this ROI
+        roi_shape = (y1 - y0, x1 - x0)
+        mask = roi_mask(roi_shape, roi, (x0, y0))
+        roi_precomputed[roi.name] = {
+            "x0": x0, "y0": y0, "x1": x1, "y1": y1,
+            "bg_roi": bg_roi,
+            "mask": mask,
+        }
+
+    # Extract timing data as numpy arrays (avoid iterrows overhead)
+    frame_indices = timing["frame"].values.astype(np.int32)
+    t_s_values = timing["t_s"].values.astype(np.float64)
+
+    # Check if frames are consecutive for sequential reading optimization
+    frames_consecutive = np.all(np.diff(frame_indices) == 1) if len(frame_indices) > 1 else True
+    if frames_consecutive and len(frame_indices) > 0:
+        # Seek to first frame once, then read sequentially
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(frame_indices[0]))
+
+    for i in range(total):
         # cooperative cancellation check
-        try:
-            if cancel_event is not None and cancel_event.is_set():
-                # return partial result early; session layer will emit cancelled
-                break
-        except Exception:
-            pass
-        #if i == 100:
-        #    cap.release()
-        #    return TrackingResult(video=video, tracks=list(tracks.values()), background=bg)
+        if cancel_event is not None and cancel_event.is_set():
+            break
 
-        frame_idx = int(row["frame"])
-        t_s = float(row["t_s"])
+        frame_idx = int(frame_indices[i])
+        t_s = float(t_s_values[i])
 
-        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+        # Sequential read (no seeking) if frames are consecutive
+        if not frames_consecutive:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
         ok, frame = cap.read()
         if not ok:
             continue
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
         for roi in video.rois:
-            roi_gray, (x0, y0) = crop_roi(gray, roi)
-            bg_roi, _ = crop_roi(bg, roi)
-            mask = roi_mask(roi_gray.shape[:2], roi, (x0, y0))
+            pre = roi_precomputed[roi.name]
+            x0, y0, x1, y1 = pre["x0"], pre["y0"], pre["x1"], pre["y1"]
+            roi_gray = gray[y0:y1, x0:x1]
+            bg_roi = pre["bg_roi"]
+            mask = pre["mask"]
 
-            cand = _extract_ellipses(roi_gray, bg_roi, cfg, mask=mask)
+            cand = _extract_ellipses(
+                roi_gray, bg_roi, cfg,
+                mask=mask,
+                kernel_open=kernel_open,
+                kernel_close=kernel_close,
+            )
 
             kf = kalman[roi.name]
             if kf is None:
@@ -227,20 +276,17 @@ def track_video(
             tracks[roi.name].observations.append(obs)
 
         # report progress (throttled by progress_every)
-        try:
-            if progress_hook is not None and ((i % max(1, progress_every)) == 0):
-                    percent = float(i + 1) / float(max(1, total))
-                    progress_hook(
-                        "progress",
-                        {
-                            "frame_idx": frame_idx,
-                            "frame_count": int(i + 1),
-                            "t_s": t_s,
-                            "percent": percent,
-                        },
-                    )
-        except Exception:
-            pass
+        if progress_hook is not None and ((i % max(1, progress_every)) == 0):
+            percent = float(i + 1) / float(max(1, total))
+            progress_hook(
+                "progress",
+                {
+                    "frame_idx": frame_idx,
+                    "frame_count": int(i + 1),
+                    "t_s": t_s,
+                    "percent": percent,
+                },
+            )
 
     cap.release()
     return TrackingResult(video=video, tracks=list(tracks.values()), background=bg)
