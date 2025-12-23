@@ -1,0 +1,4 @@
+[console_scripts]
+anytrack = anytrack.cli:main
+anytrack-bg = anytrack.cli:bg_main
+anytrack-roi = anytrack.cli:roi_main

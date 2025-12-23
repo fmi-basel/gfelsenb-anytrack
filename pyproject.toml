@@ -1,21 +1,32 @@
-[tool.poetry]
+[project]
 name = "anytrack"
-version = "1.0.0"
-description = "Library for logging, processing, visualization and sharing of image-based tracking data of fruit flies written in Python."
-authors = ["Dennis Goldschmidt <dennis.goldschmidt@fmi.ch>"]
-license = "GPLv3"
+version = "0.1.0"
+description = "Modular ROI-based centroid tracking for AVI videos + per-frame timing CSV, with a ttkbootstrap GUI."
 readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.24",
+  "pandas>=2.0",
+  "opencv-python>=4.8",
+  "pillow>=10.0",
+  "ttkbootstrap>=1.10",
+  "tksheet>=7.0",
+  "platformdirs>=4.0",
+  "tqdm>=4.67.1",
+]
 
-[tool.poetry.dependencies]
-python = "^3.12"
-setuptools = "^72.1.0"
-opencv-python = "^4.10.0.84"
-numpy = "^2.0.1"
-tqdm = "^4.66.5"
-pandas = "^2.2.2"
-toml = "^0.10.2"
-scipy = "^1.14.1"
+[project.scripts]
+anytrack = "anytrack.cli:main"
+anytrack-bg = "anytrack.cli:bg_main"
+anytrack-roi = "anytrack.cli:roi_main"
 
-[build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
+[tool.uv]
+# uv will generate uv.lock when you run `uv lock`.
+# Pin/override versions here if needed.
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.pyright]
+typeCheckingMode = "basic"

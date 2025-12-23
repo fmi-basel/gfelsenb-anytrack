@@ -1,3 +1,18 @@
+Metadata-Version: 2.4
+Name: anytrack
+Version: 0.1.0
+Summary: Modular ROI-based centroid tracking for AVI videos + per-frame timing CSV, with a ttkbootstrap GUI.
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: numpy>=1.24
+Requires-Dist: pandas>=2.0
+Requires-Dist: opencv-python>=4.8
+Requires-Dist: pillow>=10.0
+Requires-Dist: ttkbootstrap>=1.10
+Requires-Dist: tksheet>=7.0
+Requires-Dist: platformdirs>=4.0
+Requires-Dist: tqdm>=4.67.1
+
 # anytrack (skeleton)
 
 A modular tracking pipeline + GUI for AVI videos and a CSV containing:
