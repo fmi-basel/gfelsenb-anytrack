@@ -134,6 +134,7 @@ def track_roi_video(
     preprocess_result: PreprocessResult,
     timing: pd.DataFrame,
     cfg: AnyTrackConfig,
+    roi_background: Optional[np.ndarray] = None,
 ) -> FlyTrack:
     """
     Track a single pre-cropped ROI video.
@@ -143,6 +144,7 @@ def track_roi_video(
         preprocess_result: PreprocessResult with scaling info
         timing: Timing DataFrame with frame and t_s columns
         cfg: Tracking configuration
+        roi_background: Optional pre-cropped background (avoids per-ROI background building)
 
     Returns:
         FlyTrack with observations in original frame coordinates
@@ -151,19 +153,22 @@ def track_roi_video(
     x0, y0 = preprocess_result.crop_offset
     roi = preprocess_result.original_roi
 
-    # Build background for this ROI video
-    bg_model = build_background(
-        str(roi_video_path),
-        method=cfg.bg_method,
-        k_min=cfg.bg_min_frames,
-        k_max=cfg.bg_max_frames,
-        converge_eps=cfg.bg_converge_eps,
-        fg_thresh=cfg.bg_fg_thresh,
-        inpaint_ghosts=cfg.bg_inpaint_ghosts,
-        ghost_area_min=cfg.bg_ghost_area_min,
-        ghost_area_max=cfg.bg_ghost_area_max,
-    )
-    bg = bg_model.image
+    # Use pre-cropped background if provided, otherwise build from ROI video
+    if roi_background is not None:
+        bg = roi_background
+    else:
+        bg_model = build_background(
+            str(roi_video_path),
+            method=cfg.bg_method,
+            k_min=cfg.bg_min_frames,
+            k_max=cfg.bg_max_frames,
+            converge_eps=cfg.bg_converge_eps,
+            fg_thresh=cfg.bg_fg_thresh,
+            inpaint_ghosts=cfg.bg_inpaint_ghosts,
+            ghost_area_min=cfg.bg_ghost_area_min,
+            ghost_area_max=cfg.bg_ghost_area_max,
+        )
+        bg = bg_model.image
 
     # Pre-allocate morphology kernels
     kernel_open = None
@@ -264,7 +269,7 @@ def track_roi_video(
 
 def _track_roi_worker(args: tuple) -> FlyTrack:
     """Worker function for multiprocessing."""
-    roi_video_path, preprocess_result, timing_dict, cfg_dict = args
+    roi_video_path, preprocess_result, timing_dict, cfg_dict, bg_data = args
 
     # Reconstruct objects from serializable forms
     from .config import AnyTrackConfig
@@ -283,7 +288,13 @@ def _track_roi_worker(args: tuple) -> FlyTrack:
         crop_offset=tuple(preprocess_result["crop_offset"]),
     )
 
-    return track_roi_video(Path(roi_video_path), pr, timing, cfg)
+    # Reconstruct background from serialized data if provided
+    roi_background = None
+    if bg_data is not None:
+        bg_bytes, bg_shape, bg_dtype = bg_data
+        roi_background = np.frombuffer(bg_bytes, dtype=bg_dtype).reshape(bg_shape)
+
+    return track_roi_video(Path(roi_video_path), pr, timing, cfg, roi_background=roi_background)
 
 
 def track_parallel(
@@ -292,6 +303,7 @@ def track_parallel(
     cfg: AnyTrackConfig,
     n_workers: Optional[int] = None,
     progress_hook: Optional[Callable[[str, dict], None]] = None,
+    roi_backgrounds: Optional[Dict[str, np.ndarray]] = None,
 ) -> List[FlyTrack]:
     """
     Track all ROIs in parallel using multiprocessing.
@@ -302,6 +314,7 @@ def track_parallel(
         cfg: Tracking configuration
         n_workers: Number of worker processes (default: CPU count)
         progress_hook: Optional callback for progress updates
+        roi_backgrounds: Optional dict mapping roi_name -> pre-cropped background image
 
     Returns:
         List of FlyTrack objects
@@ -334,7 +347,12 @@ def track_parallel(
             "scale_factor": pr.scale_factor,
             "crop_offset": list(pr.crop_offset),
         }
-        worker_args.append((str(pr.video_path), pr_dict, timing_dict, cfg_dict))
+        # Serialize background for multiprocessing if provided
+        bg_data = None
+        if roi_backgrounds is not None and roi_name in roi_backgrounds:
+            bg = roi_backgrounds[roi_name]
+            bg_data = (bg.tobytes(), bg.shape, str(bg.dtype))
+        worker_args.append((str(pr.video_path), pr_dict, timing_dict, cfg_dict, bg_data))
 
     if progress_hook:
         progress_hook("tracking", {
@@ -423,7 +441,7 @@ def track_video_fast(
         progress_hook=progress_hook,
     )
 
-    # Run parallel tracking
+    # Run parallel tracking (each worker builds its own background from ROI video)
     if progress_hook:
         progress_hook("status", {"stage": "tracking"})
 

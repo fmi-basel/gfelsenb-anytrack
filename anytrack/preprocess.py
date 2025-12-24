@@ -133,6 +133,134 @@ def extract_roi_video(
     )
 
 
+def _extract_roi_videos_single_pass(
+    input_video: Path,
+    rois: List[CircleROI],
+    output_dir: Path,
+    downscale: int = 2,
+    use_hw_encode: bool = True,
+) -> Dict[str, PreprocessResult]:
+    """
+    Extract all ROI videos in a single FFmpeg pass.
+
+    This decodes the input video once and writes all outputs simultaneously,
+    which is faster than decoding multiple times.
+    """
+    ffmpeg = get_ffmpeg_path()
+
+    # Build filter_complex for all ROIs
+    filter_parts = []
+    output_args = []
+    results: Dict[str, PreprocessResult] = {}
+
+    for i, roi in enumerate(rois):
+        crop_size = int(2 * roi.r)
+        x0 = int(max(0, roi.cx - roi.r))
+        y0 = int(max(0, roi.cy - roi.r))
+        scaled_size = crop_size // downscale if downscale > 1 else crop_size
+
+        # Filter for this ROI: [0:v]crop=...,scale=...[outN]
+        filter_str = f"[0:v]crop={crop_size}:{crop_size}:{x0}:{y0}"
+        if downscale > 1:
+            filter_str += f",scale={scaled_size}:{scaled_size}"
+        filter_str += f"[out{i}]"
+        filter_parts.append(filter_str)
+
+        # Output args for this ROI
+        output_path = output_dir / f"roi_{roi.name}.mp4"
+
+        if use_hw_encode:
+            encoder = "h264_videotoolbox"
+            encoder_opts = ["-q:v", "50"]
+        else:
+            encoder = "libx264"
+            encoder_opts = ["-preset", "ultrafast", "-crf", "18"]
+
+        output_args.extend([
+            "-map", f"[out{i}]",
+            "-c:v", encoder,
+            *encoder_opts,
+            "-an",
+            str(output_path),
+        ])
+
+        results[roi.name] = PreprocessResult(
+            roi_name=roi.name,
+            video_path=output_path,
+            original_roi=roi,
+            scale_factor=float(downscale),
+            crop_offset=(x0, y0),
+        )
+
+    filter_complex = ";".join(filter_parts)
+
+    cmd = [
+        ffmpeg,
+        "-y",
+        "-i", str(input_video),
+        "-filter_complex", filter_complex,
+        *output_args,
+    ]
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+
+        if result.returncode != 0:
+            # If hardware encoder failed, fall back to sequential extraction
+            if use_hw_encode and "videotoolbox" in result.stderr.lower():
+                return _extract_roi_videos_sequential(
+                    input_video, rois, output_dir,
+                    downscale=downscale,
+                    use_hw_encode=False,
+                )
+            raise RuntimeError(f"FFmpeg failed: {result.stderr}")
+
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("FFmpeg timed out during ROI extraction")
+
+    return results
+
+
+def _extract_roi_videos_sequential(
+    input_video: Path,
+    rois: List[CircleROI],
+    output_dir: Path,
+    downscale: int = 2,
+    use_hw_encode: bool = True,
+    progress_hook: Optional[Callable[[str, dict], None]] = None,
+) -> Dict[str, PreprocessResult]:
+    """Sequential extraction fallback."""
+    results: Dict[str, PreprocessResult] = {}
+
+    for i, roi in enumerate(rois):
+        if progress_hook:
+            progress_hook("preprocessing", {
+                "roi": roi.name,
+                "index": i,
+                "total": len(rois),
+                "percent": float(i) / len(rois),
+            })
+
+        output_path = output_dir / f"roi_{roi.name}.mp4"
+
+        result = extract_roi_video(
+            input_video=input_video,
+            roi=roi,
+            output_path=output_path,
+            downscale=downscale,
+            use_hw_encode=use_hw_encode,
+        )
+
+        results[roi.name] = result
+
+    return results
+
+
 def extract_roi_videos(
     input_video: Path,
     rois: List[CircleROI],
@@ -163,28 +291,15 @@ def extract_roi_videos(
     else:
         output_dir.mkdir(parents=True, exist_ok=True)
 
-    results: Dict[str, PreprocessResult] = {}
-
-    for i, roi in enumerate(rois):
-        if progress_hook:
-            progress_hook("preprocessing", {
-                "roi": roi.name,
-                "index": i,
-                "total": len(rois),
-                "percent": float(i) / len(rois),
-            })
-
-        output_path = output_dir / f"roi_{roi.name}.mp4"
-
-        result = extract_roi_video(
-            input_video=input_video,
-            roi=roi,
-            output_path=output_path,
-            downscale=downscale,
-            use_hw_encode=use_hw_encode,
-        )
-
-        results[roi.name] = result
+    # Sequential extraction is fastest with VideoToolbox hardware encoding
+    results = _extract_roi_videos_sequential(
+        input_video=input_video,
+        rois=rois,
+        output_dir=output_dir,
+        downscale=downscale,
+        use_hw_encode=use_hw_encode,
+        progress_hook=progress_hook,
+    )
 
     if progress_hook:
         progress_hook("preprocessing", {

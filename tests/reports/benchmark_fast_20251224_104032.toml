@@ -1,0 +1,34 @@
+[metadata]
+timestamp = "2025-12-24T10:40:32.432134"
+git_commit = "e38e35d"
+machine = "Apple M3 Pro"
+memory_gb = 36.0
+platform = "Darwin"
+python_version = "3.12.2"
+opencv_version = "4.11.0"
+
+[video]
+path = "localsearch_2025-12-11T09_34_21.avi"
+resolution = "2176x2176"
+n_rois = 4
+total_frames = 18005
+
+[benchmark]
+n_frames = 10000
+n_runs = 3
+
+[results]
+fps_per_run = [139.12, 138.89, 142.44]
+fps_mean = 140.15
+fps_std = 1.99
+ms_per_frame_mean = 7.14
+total_time_s = 214.09
+
+[config]
+bg_method = "mean_excluding_fg"
+thr_method = "otsu"
+thr_fixed = 35
+morph_open = 3
+morph_close = 5
+use_kalman = true
+max_jump_px = 40.0

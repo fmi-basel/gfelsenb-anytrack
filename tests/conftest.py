@@ -22,9 +22,9 @@ def pytest_addoption(parser):
     parser.addoption(
         "--benchmark-frames",
         action="store",
-        default=1000,
+        default=10000,
         type=int,
-        help="Number of frames to process per benchmark run (default: 1000)",
+        help="Number of frames to process per benchmark run (default: 10000)",
     )
     parser.addoption(
         "--benchmark-runs",
