@@ -67,7 +67,7 @@ class AnyTrackConfig:
     preview_downscale: float = 1.0  # set <1 for speed on large frames
 
     # Fast mode (parallel ROI tracking with FFmpeg preprocessing)
-    fast_mode: bool = False
+    fast_mode: bool = True
     roi_downscale: int = 2  # Downscale factor for ROI videos (1, 2, or 4)
     n_tracking_workers: int = 4  # Number of parallel tracking workers
     use_hw_encode: bool = True  # Try hardware encoding (VideoToolbox on macOS)

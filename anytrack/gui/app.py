@@ -998,4 +998,5 @@ def run(
     if n_tracking_workers is not None:
         app.cfg.n_tracking_workers = n_tracking_workers
 
+    print('FAST MODE:', app.cfg.fast_mode)
     app.mainloop()
