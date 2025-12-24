@@ -66,6 +66,13 @@ class AnyTrackConfig:
     # GUI
     preview_downscale: float = 1.0  # set <1 for speed on large frames
 
+    # Fast mode (parallel ROI tracking with FFmpeg preprocessing)
+    fast_mode: bool = False
+    roi_downscale: int = 2  # Downscale factor for ROI videos (1, 2, or 4)
+    n_tracking_workers: int = 4  # Number of parallel tracking workers
+    use_hw_encode: bool = True  # Try hardware encoding (VideoToolbox on macOS)
+    cleanup_roi_videos: bool = True  # Delete temp ROI videos after tracking
+
 def config_path() -> Path:
     cfg_dir = Path(user_config_dir(APP_NAME))
     cfg_dir.mkdir(parents=True, exist_ok=True)

@@ -849,7 +849,8 @@ class AnyTrackApp(tb.Window):
                     # initialize ETA estimator
                     try:
                         self._track_total_frames = int(total) if total is not None else None
-                        self._eta_est = ETAEstimator(alpha=0.20)
+                        # Use default alpha (0.05) for smoother estimates
+                        self._eta_est = ETAEstimator()
                         self._eta_est.start()
                     except Exception:
                         self._eta_est = None
@@ -873,11 +874,22 @@ class AnyTrackApp(tb.Window):
                                 self._eta_est.update(frames_done)
                                 eta_s = self._eta_est.eta_seconds(total, frames_done)
                                 eta_text = self._eta_est.format_seconds(eta_s)
+                                fps_val = self._eta_est.fps()
+                                # Fixed-width: "---.- fps" or "123.4 fps"
+                                fps_text = f"{fps_val:5.1f} fps" if fps_val is not None else " --.- fps"
                             else:
-                                eta_text = "estimating…"
+                                eta_text = "--:--"
+                                fps_text = " --.- fps"
                         except Exception:
-                            eta_text = "estimating…"
-                        status_text = f"Frame {frame_idx} — {pct*100:.1f}% — ETA {eta_text}"
+                            eta_text = "--:--"
+                            fps_text = " --.- fps"
+                        # Fixed-width formatting for stable display
+                        # Frame field width based on total frames
+                        frame_width = len(str(total)) if total else 5
+                        pct_str = f"{pct*100:5.1f}%"
+                        frame_str = f"{frame_idx:>{frame_width}}" if frame_idx is not None else "-" * frame_width
+                        total_str = f"{total:>{frame_width}}" if total else "-" * frame_width
+                        status_text = f"Frame {frame_str}/{total_str}  {pct_str}  {fps_text}  ETA {eta_text}"
                         dialog.update_progress(pct, frame=frame_idx, t_s=t_s, text=status_text)
                     except Exception:
                         pass
@@ -963,6 +975,27 @@ class AnyTrackApp(tb.Window):
         except Exception:
             pass
 
-def run():
+def run(
+    fast_mode: bool = False,
+    roi_downscale: int = 2,
+    n_tracking_workers: Optional[int] = None,
+):
+    """
+    Launch the anytrack GUI.
+
+    Args:
+        fast_mode: Enable fast mode (FFmpeg preprocessing + parallel tracking)
+        roi_downscale: Downscale factor for ROI videos (1, 2, or 4)
+        n_tracking_workers: Number of parallel tracking workers
+    """
     app = AnyTrackApp()
+
+    # Override config with CLI settings if provided
+    if fast_mode:
+        app.cfg.fast_mode = True
+    if roi_downscale != 2:
+        app.cfg.roi_downscale = roi_downscale
+    if n_tracking_workers is not None:
+        app.cfg.n_tracking_workers = n_tracking_workers
+
     app.mainloop()

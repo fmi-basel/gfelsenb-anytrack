@@ -32,6 +32,7 @@ from anytrack.io import load_video_asset
 from anytrack.roi import detect_circular_rois
 from anytrack.background import build_background
 from anytrack.tracking import track_video
+from anytrack.tracking_fast import track_video_fast
 
 
 def benchmark_tracking(
@@ -39,6 +40,7 @@ def benchmark_tracking(
     cfg: AnyTrackConfig,
     n_frames: int = 1000,
     n_runs: int = 3,
+    use_fast_mode: bool = False,
 ) -> dict:
     """
     Run tracking benchmark and return timing stats.
@@ -48,6 +50,7 @@ def benchmark_tracking(
         cfg: Tracking configuration
         n_frames: Number of frames to process per run
         n_runs: Number of runs to average
+        use_fast_mode: Use fast mode (FFmpeg + parallel tracking)
 
     Returns:
         Dictionary with benchmark results:
@@ -82,12 +85,16 @@ def benchmark_tracking(
 
     fps_per_run = []
     times_per_run = []
+    mode_label = "FAST" if use_fast_mode else "LEGACY"
 
     for run_idx in range(n_runs):
-        print(f"  Run {run_idx + 1}/{n_runs}...", end=" ", flush=True)
+        print(f"  [{mode_label}] Run {run_idx + 1}/{n_runs}...", end=" ", flush=True)
 
         start = time.perf_counter()
-        _ = track_video(limited_video, cfg, progress_hook=None, cancel_event=None)
+        if use_fast_mode:
+            _ = track_video_fast(limited_video, cfg, progress_hook=None, cleanup=True)
+        else:
+            _ = track_video(limited_video, cfg, progress_hook=None, cancel_event=None)
         elapsed = time.perf_counter() - start
 
         fps = n_frames / elapsed
@@ -259,6 +266,104 @@ def test_tracking_performance(
     # Write report
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     report_path = reports_dir / f"benchmark_{timestamp}.toml"
+
+    write_benchmark_report(
+        results=results,
+        output_path=report_path,
+        video=video,
+        cfg=test_config,
+        metadata=machine_info,
+        git_commit=git_commit,
+    )
+
+    print(f"\nReport written to: {report_path}")
+    print("=" * 60)
+
+    # Assert something to make pytest happy
+    assert results["fps_mean"] > 0, "FPS should be positive"
+
+
+def test_tracking_performance_fast(
+    test_video_path: Path,
+    test_timing_path: Path,
+    test_config: AnyTrackConfig,
+    benchmark_frames: int,
+    benchmark_runs: int,
+    reports_dir: Path,
+    machine_info: dict,
+    git_commit: Optional[str],
+):
+    """
+    Fast mode benchmark test.
+    Uses FFmpeg preprocessing + parallel ROI tracking.
+    """
+    from anytrack.preprocess import check_ffmpeg_available
+
+    if not check_ffmpeg_available():
+        pytest.skip("FFmpeg not available. Install FFmpeg to run fast mode benchmark.")
+
+    print("\n" + "=" * 60)
+    print("ANYTRACK FAST MODE BENCHMARK")
+    print("=" * 60)
+
+    # Load video
+    print(f"\nLoading video: {test_video_path.name}")
+    video = load_video_asset(test_video_path, test_timing_path)
+    print(f"  Resolution: {video.width}x{video.height}")
+    print(f"  Total frames: {video.frame_count}")
+
+    # Detect ROIs if not present
+    if not video.rois:
+        print("\nDetecting ROIs...")
+        bg = build_background(
+            str(video.video_path),
+            method=test_config.bg_method,
+            k_min=max(10, test_config.bg_min_frames // 3),
+            k_max=max(60, test_config.bg_min_frames),
+        ).image
+        video.rois = detect_circular_rois(
+            bg,
+            dp=test_config.roi_hough_dp,
+            min_dist_ratio=test_config.roi_hough_min_dist_ratio,
+            param1=test_config.roi_hough_param1,
+            param2=test_config.roi_hough_param2,
+            min_radius_ratio=test_config.min_radius_ratio,
+            max_radius_ratio=test_config.max_radius_ratio,
+        )
+    print(f"  ROIs: {len(video.rois)}")
+
+    if not video.rois:
+        pytest.fail("No ROIs detected. Cannot run benchmark without ROIs.")
+
+    # Configure fast mode
+    test_config.fast_mode = True
+    test_config.roi_downscale = 2
+    test_config.n_tracking_workers = 4
+
+    # Run benchmark
+    print(f"\nRunning FAST MODE benchmark: {benchmark_runs} runs x {benchmark_frames} frames")
+    print(f"  Downscale: {test_config.roi_downscale}x")
+    print(f"  Workers: {test_config.n_tracking_workers}")
+    print("-" * 40)
+
+    results = benchmark_tracking(
+        video=video,
+        cfg=test_config,
+        n_frames=benchmark_frames,
+        n_runs=benchmark_runs,
+        use_fast_mode=True,
+    )
+
+    # Print summary
+    print("-" * 40)
+    print(f"\nRESULTS (FAST MODE):")
+    print(f"  Mean FPS: {results['fps_mean']:.2f} +/- {results['fps_std']:.2f}")
+    print(f"  Mean ms/frame: {results['ms_per_frame_mean']:.2f}")
+    print(f"  Total time: {results['total_time_s']:.2f}s")
+
+    # Write report
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    report_path = reports_dir / f"benchmark_fast_{timestamp}.toml"
 
     write_benchmark_report(
         results=results,

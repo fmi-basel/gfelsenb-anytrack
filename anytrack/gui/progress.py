@@ -12,22 +12,32 @@ import time
 
 
 class ETAEstimator:
-    """Estimate remaining time (seconds) using an EMA of per-frame time.
+    """Estimate remaining time (seconds) using a smoothed EMA of per-frame time.
+
+    Uses a slower-adapting EMA (lower alpha) for more stable estimates,
+    plus a warmup period before reporting values.
 
     Usage:
-      eta = ETAEstimator(alpha=0.2)
+      eta = ETAEstimator()
       eta.start()
-      eta.update(frames_done)  # called with increasing integer counts
+      eta.update(frames_done)
       s = eta.eta_seconds(total_frames, frames_done)
       eta.format_seconds(s)
     """
 
-    def __init__(self, alpha: float = 0.20):
+    def __init__(self, alpha: float = 0.05, warmup_frames: int = 10):
+        """
+        Args:
+            alpha: EMA smoothing factor (lower = smoother, 0.05 recommended)
+            warmup_frames: Minimum frames before reporting estimates
+        """
         self.alpha = float(alpha)
+        self.warmup_frames = warmup_frames
         self.start_t: float | None = None
         self.last_t: float | None = None
         self.last_count: int = 0
         self.ema_per_frame: float | None = None
+        self._update_count: int = 0
 
     def start(self) -> None:
         now = time.monotonic()
@@ -35,6 +45,7 @@ class ETAEstimator:
         self.last_t = now
         self.last_count = 0
         self.ema_per_frame = None
+        self._update_count = 0
 
     def update(self, frames_done: int) -> None:
         now = time.monotonic()
@@ -48,30 +59,43 @@ class ETAEstimator:
         if dt <= 0:
             return
         per_frame = dt / delta
+        self._update_count += 1
+
         if self.ema_per_frame is None:
             self.ema_per_frame = per_frame
         else:
-            a = self.alpha
+            # Use higher alpha during warmup for faster initial convergence
+            a = min(0.3, self.alpha * 3) if self._update_count < self.warmup_frames else self.alpha
             self.ema_per_frame = a * per_frame + (1.0 - a) * self.ema_per_frame
         self.last_t = now
         self.last_count = frames_done
 
+    def is_warmed_up(self) -> bool:
+        """Return True if enough samples have been collected for stable estimates."""
+        return self._update_count >= self.warmup_frames
+
     def eta_seconds(self, total_frames: int, frames_done: int) -> float | None:
-        if self.ema_per_frame is None:
+        if self.ema_per_frame is None or not self.is_warmed_up():
             return None
         remaining = max(0, int(total_frames) - int(frames_done))
         return remaining * self.ema_per_frame
 
+    def fps(self) -> float | None:
+        """Return current estimated FPS (frames per second)."""
+        if self.ema_per_frame is None or self.ema_per_frame <= 0 or not self.is_warmed_up():
+            return None
+        return 1.0 / self.ema_per_frame
+
     def format_seconds(self, s: float | None) -> str:
         if s is None:
-            return "estimating…"
+            return "--:--"
         s = int(round(s))
         h = s // 3600
         m = (s % 3600) // 60
         sec = s % 60
         if h > 0:
             return f"{h:d}:{m:02d}:{sec:02d}"
-        return f"{m:d}:{sec:02d}"
+        return f"{m:02d}:{sec:02d}"
 
 
 def make_progress_hook(q: queue.Queue) -> Callable[[str, dict], None]:
@@ -126,10 +150,11 @@ class TrackingProgressDialog:
         frm = tb.Frame(self._top, padding=12)
         frm.pack(fill="both", expand=True)
 
-        self._status = tb.Label(frm, text="Starting…")
+        # Use monospace font for stable alignment of changing numbers
+        self._status = tb.Label(frm, text="Starting...", font=("TkFixedFont", 11))
         self._status.pack(fill="x", pady=(0, 8))
 
-        self._bar = ttk.Progressbar(frm, orient="horizontal", length=360, mode="determinate")
+        self._bar = ttk.Progressbar(frm, orient="horizontal", length=400, mode="determinate")
         self._bar.pack(fill="x", pady=(0, 8))
         self._bar['value'] = 0
 

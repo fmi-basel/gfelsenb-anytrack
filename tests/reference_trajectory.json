@@ -1,0 +1,12 @@
+{
+  "generated_at": "2025-12-23T22:58:18.094993",
+  "video": "localsearch_2025-12-11T09_34_21.avi",
+  "n_frames": 500,
+  "total_observations": 1995,
+  "rois": [
+    "arena_01",
+    "arena_02",
+    "arena_03",
+    "arena_04"
+  ]
+}

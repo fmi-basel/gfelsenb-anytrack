@@ -17,11 +17,34 @@ from .background import build_background
 def main():
     parser = argparse.ArgumentParser(prog="anytrack")
     parser.add_argument("--nogui", action="store_true", help="Do not start GUI (placeholder).")
+    parser.add_argument(
+        "--fast",
+        action="store_true",
+        help="Enable fast mode (FFmpeg preprocessing + parallel ROI tracking).",
+    )
+    parser.add_argument(
+        "--downscale",
+        type=int,
+        default=2,
+        choices=[1, 2, 4],
+        help="ROI downscale factor for fast mode (default: 2).",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="Number of parallel tracking workers (default: CPU count).",
+    )
     args = parser.parse_args()
     if args.nogui:
         print("CLI-only mode is not implemented in this skeleton. Run without --nogui.")
         return
-    run_gui()
+    # Pass fast mode settings to GUI
+    run_gui(
+        fast_mode=args.fast,
+        roi_downscale=args.downscale,
+        n_tracking_workers=args.workers,
+    )
 
 
 class _BgDebugApp:

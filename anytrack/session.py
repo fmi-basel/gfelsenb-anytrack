@@ -7,6 +7,7 @@ import pandas as pd
 from .models import VideoAsset, TrackingResult
 from .config import AnyTrackConfig
 from .tracking import track_video
+from .tracking_fast import track_video_fast
 from .trajectory import interpolate_missing, enforce_single_per_frame
 from .kinematics import add_kinematics
 
@@ -19,13 +20,23 @@ class TrackingSession:
 
     def run(self, progress_hook=None, cancel_event=None, progress_every: int = 1) -> pd.DataFrame:
         try:
-            self.result = track_video(
-                self.video,
-                self.cfg,
-                progress_hook=progress_hook,
-                cancel_event=cancel_event,
-                progress_every=progress_every,
-            )
+            if self.cfg.fast_mode:
+                # Fast mode: FFmpeg preprocessing + parallel ROI tracking
+                self.result = track_video_fast(
+                    self.video,
+                    self.cfg,
+                    progress_hook=progress_hook,
+                    cleanup=self.cfg.cleanup_roi_videos,
+                )
+            else:
+                # Legacy mode: single-pass tracking
+                self.result = track_video(
+                    self.video,
+                    self.cfg,
+                    progress_hook=progress_hook,
+                    cancel_event=cancel_event,
+                    progress_every=progress_every,
+                )
         except Exception as e:
             if progress_hook is not None:
                 try:
