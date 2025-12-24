@@ -56,6 +56,20 @@ class AnyTrackApp(tb.Window):
         self.preview_mode: str = "video"  # "video" or "background"
         self._background_building: bool = False  # guard against concurrent background builds
 
+        # Play/Pause functionality
+        self._playing: bool = False
+        self._play_job: Optional[str] = None
+        self._play_fps: int = 30
+
+        # Pan and Zoom functionality
+        self._zoom_level: float = 1.0
+        self._pan_x: float = 0.0
+        self._pan_y: float = 0.0
+        self._drag_start_x: Optional[int] = None
+        self._drag_start_y: Optional[int] = None
+        self._drag_start_pan_x: float = 0.0
+        self._drag_start_pan_y: float = 0.0
+
         # Background debug window (optional)
         self.debug_bg_var = tk.BooleanVar(value=False)
         self._bg_debug_win = None
@@ -142,6 +156,20 @@ class AnyTrackApp(tb.Window):
         self.canvas = tk.Canvas(preview, bg="black", highlightthickness=0)
         self.canvas.grid(row=0, column=0, sticky="nsew")
 
+        # Mouse bindings for pan and zoom
+        self.canvas.bind("<MouseWheel>", self.on_mouse_wheel)  # Windows/macOS
+        self.canvas.bind("<Button-4>", self.on_mouse_wheel)    # Linux scroll up
+        self.canvas.bind("<Button-5>", self.on_mouse_wheel)    # Linux scroll down
+        self.canvas.bind("<ButtonPress-1>", self.on_canvas_press)
+        self.canvas.bind("<B1-Motion>", self.on_canvas_drag)
+        self.canvas.bind("<ButtonRelease-1>", self.on_canvas_release)
+        self.canvas.bind("<Double-Button-1>", self.on_canvas_double_click)
+        # Trackpad pinch gesture (macOS) - only available in Tk 8.6.9+
+        try:
+            self.canvas.bind("<Magnify>", self.on_magnify)
+        except Exception:
+            pass  # Magnify event not supported in this Tk version
+
         slider_row = tb.Frame(preview)
         slider_row.grid(row=1, column=0, sticky="ew", pady=(6, 0))
         slider_row.columnconfigure(0, weight=1)
@@ -150,13 +178,23 @@ class AnyTrackApp(tb.Window):
         self.slider.grid(row=0, column=0, sticky="ew")
         self.slider.configure(takefocus=True)
 
+        # Play/Pause button
+        self.play_pause_btn = tb.Button(
+            slider_row,
+            text="▶",
+            width=3,
+            command=self.toggle_play,
+            bootstyle=SUCCESS
+        )
+        self.play_pause_btn.grid(row=0, column=1, sticky="w", padx=(8, 0))
+
         # Use a fixed-width font so digits don't shift visually.
         self.frame_label = tb.Label(
             slider_row,
             text="Frame: ---- / ----",
             font=("TkFixedFont", self.element_fontsize),
         )
-        self.frame_label.grid(row=0, column=1, sticky="e", padx=(8, 0))
+        self.frame_label.grid(row=0, column=2, sticky="e", padx=(8, 0))
 
         # Click-to-jump on the trough
         self.slider.bind("<Button-1>", self.on_slider_click, add="+")
@@ -306,6 +344,10 @@ class AnyTrackApp(tb.Window):
 
         # Aspect-fit into canvas
         scale = min(cw / iw, ch / ih)
+
+        # Apply zoom
+        scale *= self._zoom_level
+
         nw = max(1, int(iw * scale))
         nh = max(1, int(ih * scale))
 
@@ -318,11 +360,30 @@ class AnyTrackApp(tb.Window):
 
         im_resized = im.resize((nw, nh), filt)
 
-        # Letterbox to canvas size
+        # Letterbox to canvas size with pan offset
         frame_box = Image.new("RGB", (cw, ch), (0, 0, 0))
+
+        # Calculate base position (centered)
         x0 = (cw - nw) // 2
         y0 = (ch - nh) // 2
-        frame_box.paste(im_resized, (x0, y0))
+
+        # Apply pan offset
+        x0 += int(self._pan_x)
+        y0 += int(self._pan_y)
+
+        # Crop the image if it extends beyond canvas bounds
+        # This handles the case where zoomed/panned image is larger than canvas
+        paste_x = max(0, x0)
+        paste_y = max(0, y0)
+
+        crop_left = max(0, -x0)
+        crop_top = max(0, -y0)
+        crop_right = min(nw, cw - x0)
+        crop_bottom = min(nh, ch - y0)
+
+        if crop_right > crop_left and crop_bottom > crop_top:
+            im_cropped = im_resized.crop((crop_left, crop_top, crop_right, crop_bottom))
+            frame_box.paste(im_cropped, (paste_x, paste_y))
 
         self._photo = ImageTk.PhotoImage(frame_box)
         self.canvas.delete("all")
@@ -350,6 +411,7 @@ class AnyTrackApp(tb.Window):
         self._open_capture()
         self._populate_tree()
         self._set_slider_range()
+        self._reset_zoom_pan()
         self.update_idletasks()
         self.show_frame(0)
 
@@ -460,6 +522,169 @@ class AnyTrackApp(tb.Window):
 
     def on_right_key(self, event=None):
         self.step_frame(1)
+
+    def toggle_play(self):
+        """Toggle play/pause state for video playback."""
+        if self.preview_mode != "video" or self.video is None:
+            return
+
+        self._playing = not self._playing
+
+        if self._playing:
+            # Start playing
+            self.play_pause_btn.configure(text="⏸")
+            self._play_next_frame()
+        else:
+            # Pause
+            self.play_pause_btn.configure(text="▶")
+            if self._play_job is not None:
+                self.after_cancel(self._play_job)
+                self._play_job = None
+
+    def _play_next_frame(self):
+        """Advance to the next frame during playback."""
+        if not self._playing or self.preview_mode != "video" or self.video is None:
+            self._playing = False
+            self.play_pause_btn.configure(text="▶")
+            return
+
+        try:
+            vmin = int(float(self.slider.cget("from")))
+            vmax = int(float(self.slider.cget("to")))
+        except Exception:
+            return
+
+        idx = int(self._current_frame_idx) + 1
+
+        # Loop back to start when reaching the end
+        if idx > vmax:
+            idx = vmin
+
+        self.slider.set(idx)
+        self.show_frame(idx)
+
+        # Schedule next frame
+        delay_ms = int(1000 / self._play_fps)
+        self._play_job = self.after(delay_ms, self._play_next_frame)
+
+    def on_mouse_wheel(self, event):
+        """Handle mouse wheel zoom."""
+        if self._last_disp_bgr is None:
+            return
+
+        # Determine zoom direction
+        if event.num == 4 or event.delta > 0:
+            # Zoom in
+            zoom_factor = 1.1
+        elif event.num == 5 or event.delta < 0:
+            # Zoom out
+            zoom_factor = 0.9
+        else:
+            return
+
+        # Update zoom level (clamp between 0.1 and 10.0)
+        new_zoom = self._zoom_level * zoom_factor
+        new_zoom = max(0.1, min(10.0, new_zoom))
+
+        # Get mouse position relative to canvas
+        canvas_x = event.x
+        canvas_y = event.y
+
+        # Adjust pan to zoom toward mouse position
+        # The idea: keep the point under the mouse cursor fixed during zoom
+        zoom_ratio = new_zoom / self._zoom_level
+
+        self._pan_x = canvas_x - (canvas_x - self._pan_x) * zoom_ratio
+        self._pan_y = canvas_y - (canvas_y - self._pan_y) * zoom_ratio
+
+        self._zoom_level = new_zoom
+
+        # Re-render with new zoom and pan
+        self._render_bgr_to_canvas(self._last_disp_bgr, resample="hq")
+
+    def on_magnify(self, event):
+        """Handle trackpad pinch gesture for zooming (macOS)."""
+        if self._last_disp_bgr is None:
+            return
+
+        # event.delta is the magnification factor
+        # Positive values = zoom in (pinch out), negative = zoom out (pinch in)
+        # Scale the delta to make gestures feel natural
+        zoom_factor = 1.0 + (event.delta * 2.0)
+
+        # Update zoom level (clamp between 0.1 and 10.0)
+        new_zoom = self._zoom_level * zoom_factor
+        new_zoom = max(0.1, min(10.0, new_zoom))
+
+        # Get gesture center position (use canvas center if position not available)
+        try:
+            canvas_x = event.x
+            canvas_y = event.y
+        except AttributeError:
+            # If position is not available, zoom toward canvas center
+            canvas_x = self.canvas.winfo_width() // 2
+            canvas_y = self.canvas.winfo_height() // 2
+
+        # Adjust pan to zoom toward gesture center
+        zoom_ratio = new_zoom / self._zoom_level
+
+        self._pan_x = canvas_x - (canvas_x - self._pan_x) * zoom_ratio
+        self._pan_y = canvas_y - (canvas_y - self._pan_y) * zoom_ratio
+
+        self._zoom_level = new_zoom
+
+        # Use fast rendering during gesture for smoothness
+        self._render_bgr_to_canvas(self._last_disp_bgr, resample="fast")
+
+    def on_canvas_press(self, event):
+        """Handle mouse button press for panning."""
+        self._drag_start_x = event.x
+        self._drag_start_y = event.y
+        self._drag_start_pan_x = self._pan_x
+        self._drag_start_pan_y = self._pan_y
+        self.canvas.configure(cursor="fleur")
+
+    def on_canvas_drag(self, event):
+        """Handle mouse drag for panning."""
+        if self._drag_start_x is None or self._drag_start_y is None:
+            return
+
+        if self._last_disp_bgr is None:
+            return
+
+        # Calculate drag delta
+        dx = event.x - self._drag_start_x
+        dy = event.y - self._drag_start_y
+
+        # Update pan position
+        self._pan_x = self._drag_start_pan_x + dx
+        self._pan_y = self._drag_start_pan_y + dy
+
+        # Re-render with new pan
+        self._render_bgr_to_canvas(self._last_disp_bgr, resample="fast")
+
+    def on_canvas_release(self, event):
+        """Handle mouse button release after panning."""
+        self._drag_start_x = None
+        self._drag_start_y = None
+        self.canvas.configure(cursor="")
+
+        # Final high-quality render
+        if self._last_disp_bgr is not None:
+            self._render_bgr_to_canvas(self._last_disp_bgr, resample="hq")
+
+    def on_canvas_double_click(self, event):
+        """Reset zoom and pan on double-click."""
+        self._reset_zoom_pan()
+
+    def _reset_zoom_pan(self):
+        """Reset zoom and pan to default values."""
+        self._zoom_level = 1.0
+        self._pan_x = 0.0
+        self._pan_y = 0.0
+
+        if self._last_disp_bgr is not None:
+            self._render_bgr_to_canvas(self._last_disp_bgr, resample="hq")
 
     def _read_frame(self, idx: int) -> Optional[np.ndarray]:
         if self._cap is None:
