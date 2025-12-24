@@ -28,6 +28,7 @@ class _EllipseCandidate:
     major: float
     minor: float
     area: float
+    contour: Optional[np.ndarray] = None  # Store contour for debugging
 
 
 class _Kalman2D:
@@ -62,7 +63,17 @@ def _extract_ellipses(
     kernel_close: Optional[np.ndarray] = None,
 ) -> List[_EllipseCandidate]:
     """Extract ellipse candidates from a frame."""
-    diff = cv2.absdiff(gray, bg_gray)
+    # Compute background difference based on type
+    bgdiff_type = getattr(cfg, 'bgdiff_type', 'dark')
+    if bgdiff_type == "dark":
+        # Only pixels darker than background
+        diff = cv2.subtract(bg_gray, gray)
+    elif bgdiff_type == "bright":
+        # Only pixels brighter than background
+        diff = cv2.subtract(gray, bg_gray)
+    else:  # "absolute"
+        # Absolute difference (original behavior)
+        diff = cv2.absdiff(gray, bg_gray)
 
     # Threshold
     if cfg.thr_method == "fixed":
@@ -90,14 +101,17 @@ def _extract_ellipses(
         (x, y), (MA, ma), angle = cv2.fitEllipse(c)
         major = float(max(MA, ma))
         minor = float(min(MA, ma))
+        # Fix angle: OpenCV has y-axis flipped, so geometric angle = -opencv_angle (in radians)
+        geometric_angle = -float(angle) % (2.*np.pi)
 
         candidates.append(_EllipseCandidate(
             x=float(x),
             y=float(y),
-            angle_deg=float(angle),
+            angle_deg=geometric_angle,
             major=major,
             minor=minor,
             area=area,
+            contour=c,
         ))
 
     # Sort by area (largest first)

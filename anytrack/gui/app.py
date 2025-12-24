@@ -19,12 +19,342 @@ from tksheet import Sheet
 from ..config import load_config, save_config, AnyTrackConfig
 from ..io import load_video_asset
 from ..background import build_background
-from ..roi import detect_circular_rois
+from ..roi import detect_circular_rois, roi_mask
 from ..session import TrackingSession
 from ..models import VideoAsset, TrackingResult
+from ..tracking import _extract_ellipses, _build_morph_kernels, _threshold_fg
 from .progress import TrackingProgressDialog, make_progress_hook, ETAEstimator
 
+
+class ZoomableImageViewer:
+    """Reusable image viewer with pan and zoom capabilities."""
+
+    def __init__(self, parent, bg="black", on_view_change=None, on_crosshair_move=None, **canvas_kwargs):
+        """
+        Create a zoomable/pannable image viewer.
+
+        Args:
+            parent: Parent widget
+            bg: Background color for canvas
+            on_view_change: Optional callback(zoom, pan_x, pan_y) called when view changes
+            on_crosshair_move: Optional callback(canvas_x, canvas_y) called when mouse moves
+            **canvas_kwargs: Additional arguments for canvas creation
+        """
+        self.canvas = tk.Canvas(parent, bg=bg, highlightthickness=0, **canvas_kwargs)
+
+        # Pan and zoom state
+        self._zoom_level = 1.0
+        self._pan_x = 0.0
+        self._pan_y = 0.0
+        self._drag_start_x = None
+        self._drag_start_y = None
+        self._drag_start_pan_x = 0.0
+        self._drag_start_pan_y = 0.0
+
+        # Current image
+        self._current_image = None  # np.ndarray in BGR format
+        self._photo = None  # ImageTk.PhotoImage
+
+        # Callback for view changes (for syncing viewers)
+        self._on_view_change = on_view_change
+        self._syncing = False  # Prevent recursive sync calls
+
+        # Crosshair state
+        self._on_crosshair_move = on_crosshair_move
+        self._crosshair_x = None  # Canvas x position
+        self._crosshair_y = None  # Canvas y position
+        self._crosshair_lines = []  # Canvas line IDs
+
+        # Bind mouse events
+        self.canvas.bind("<MouseWheel>", self._on_mouse_wheel)
+        self.canvas.bind("<Button-4>", self._on_mouse_wheel)    # Linux scroll up
+        self.canvas.bind("<Button-5>", self._on_mouse_wheel)    # Linux scroll down
+        self.canvas.bind("<ButtonPress-1>", self._on_canvas_press)
+        self.canvas.bind("<B1-Motion>", self._on_canvas_drag)
+        self.canvas.bind("<ButtonRelease-1>", self._on_canvas_release)
+        self.canvas.bind("<Double-Button-1>", self._on_canvas_double_click)
+        self.canvas.bind("<Motion>", self._on_mouse_motion)
+        self.canvas.bind("<Leave>", self._on_mouse_leave)
+
+        # Try to bind magnify gesture (macOS)
+        try:
+            self.canvas.bind("<Magnify>", self._on_magnify)
+        except Exception:
+            pass
+
+    def set_image(self, image_bgr: np.ndarray):
+        """Set the image to display (BGR format from OpenCV)."""
+        self._current_image = image_bgr
+        self.render()
+
+    def reset_view(self):
+        """Reset zoom and pan to defaults."""
+        self._zoom_level = 1.0
+        self._pan_x = 0.0
+        self._pan_y = 0.0
+        self.render()
+        self._notify_view_change()
+
+    def render(self, resample="hq"):
+        """Render the current image with zoom and pan applied."""
+        if self._current_image is None:
+            return
+
+        cw = max(1, int(self.canvas.winfo_width()))
+        ch = max(1, int(self.canvas.winfo_height()))
+
+        if cw <= 1 or ch <= 1:
+            self.canvas.update_idletasks()
+            cw = max(1, int(self.canvas.winfo_width()))
+            ch = max(1, int(self.canvas.winfo_height()))
+
+        # Convert to RGB
+        rgb = cv2.cvtColor(self._current_image, cv2.COLOR_BGR2RGB)
+        im = Image.fromarray(rgb)
+        iw, ih = im.size
+
+        # Aspect-fit into canvas
+        scale = min(cw / iw, ch / ih)
+        scale *= self._zoom_level
+
+        nw = max(1, int(iw * scale))
+        nh = max(1, int(ih * scale))
+
+        # Choose resampling mode (Pillow compatibility)
+        try:
+            if resample == "fast":
+                filt = Image.Resampling.BILINEAR
+            else:
+                filt = Image.Resampling.LANCZOS
+        except AttributeError:
+            # Older Pillow versions
+            if resample == "fast":
+                filt = Image.BILINEAR  # type: ignore
+            else:
+                filt = Image.LANCZOS  # type: ignore
+
+        im_resized = im.resize((nw, nh), filt)
+
+        # Letterbox to canvas size with pan offset
+        frame_box = Image.new("RGB", (cw, ch), (0, 0, 0))
+
+        # Calculate base position (centered)
+        x0 = (cw - nw) // 2
+        y0 = (ch - nh) // 2
+
+        # Apply pan offset
+        x0 += int(self._pan_x)
+        y0 += int(self._pan_y)
+
+        # Crop if extending beyond canvas
+        paste_x = max(0, x0)
+        paste_y = max(0, y0)
+
+        crop_left = max(0, -x0)
+        crop_top = max(0, -y0)
+        crop_right = min(nw, cw - x0)
+        crop_bottom = min(nh, ch - y0)
+
+        if crop_right > crop_left and crop_bottom > crop_top:
+            im_cropped = im_resized.crop((crop_left, crop_top, crop_right, crop_bottom))
+            frame_box.paste(im_cropped, (paste_x, paste_y))
+
+        self._photo = ImageTk.PhotoImage(frame_box)
+        self.canvas.delete("all")
+        self.canvas.create_image(0, 0, image=self._photo, anchor="nw")
+
+    def set_view_from_sync(self, zoom: float, pan_x: float, pan_y: float):
+        """Set zoom and pan from external sync without triggering callbacks."""
+        self._syncing = True
+        self._zoom_level = zoom
+        self._pan_x = pan_x
+        self._pan_y = pan_y
+        self.render(resample="hq")
+        self._syncing = False
+
+    def _notify_view_change(self):
+        """Notify callback of view change if not syncing."""
+        if not self._syncing and self._on_view_change is not None:
+            self._on_view_change(self._zoom_level, self._pan_x, self._pan_y)
+
+    def _on_mouse_wheel(self, event):
+        """Handle mouse wheel zoom."""
+        if self._current_image is None:
+            return
+
+        # Determine zoom direction
+        if event.num == 4 or event.delta > 0:
+            zoom_factor = 1.1
+        elif event.num == 5 or event.delta < 0:
+            zoom_factor = 0.9
+        else:
+            return
+
+        # Update zoom level
+        new_zoom = self._zoom_level * zoom_factor
+        new_zoom = max(0.1, min(10.0, new_zoom))
+
+        # Zoom toward mouse position
+        canvas_x = event.x
+        canvas_y = event.y
+        zoom_ratio = new_zoom / self._zoom_level
+
+        self._pan_x = canvas_x - (canvas_x - self._pan_x) * zoom_ratio
+        self._pan_y = canvas_y - (canvas_y - self._pan_y) * zoom_ratio
+        self._zoom_level = new_zoom
+
+        self.render(resample="hq")
+        self._notify_view_change()
+
+    def _on_magnify(self, event):
+        """Handle trackpad pinch gesture."""
+        if self._current_image is None:
+            return
+
+        zoom_factor = 1.0 + (event.delta * 2.0)
+        new_zoom = self._zoom_level * zoom_factor
+        new_zoom = max(0.1, min(10.0, new_zoom))
+
+        try:
+            canvas_x = event.x
+            canvas_y = event.y
+        except AttributeError:
+            canvas_x = self.canvas.winfo_width() // 2
+            canvas_y = self.canvas.winfo_height() // 2
+
+        zoom_ratio = new_zoom / self._zoom_level
+        self._pan_x = canvas_x - (canvas_x - self._pan_x) * zoom_ratio
+        self._pan_y = canvas_y - (canvas_y - self._pan_y) * zoom_ratio
+        self._zoom_level = new_zoom
+
+        self.render(resample="fast")
+        self._notify_view_change()
+
+    def _on_canvas_press(self, event):
+        """Handle mouse button press for panning."""
+        self._drag_start_x = event.x
+        self._drag_start_y = event.y
+        self._drag_start_pan_x = self._pan_x
+        self._drag_start_pan_y = self._pan_y
+        self.canvas.configure(cursor="fleur")
+
+    def _on_canvas_drag(self, event):
+        """Handle mouse drag for panning."""
+        if self._drag_start_x is None or self._current_image is None:
+            return
+
+        dx = event.x - self._drag_start_x
+        dy = event.y - self._drag_start_y
+
+        self._pan_x = self._drag_start_pan_x + dx
+        self._pan_y = self._drag_start_pan_y + dy
+
+        self.render(resample="fast")
+
+    def _on_canvas_release(self, event):
+        """Handle mouse button release."""
+        self._drag_start_x = None
+        self._drag_start_y = None
+        self.canvas.configure(cursor="")
+
+        if self._current_image is not None:
+            self.render(resample="hq")
+            self._notify_view_change()
+
+    def _on_canvas_double_click(self, event):
+        """Reset zoom and pan on double-click."""
+        self.reset_view()
+
+    def _on_mouse_motion(self, event):
+        """Handle mouse motion for crosshair display."""
+        self._crosshair_x = event.x
+        self._crosshair_y = event.y
+        self._draw_crosshair()
+
+        # Notify callback
+        if self._on_crosshair_move is not None:
+            self._on_crosshair_move(event.x, event.y)
+
+    def _on_mouse_leave(self, event):
+        """Clear crosshair when mouse leaves canvas."""
+        self._crosshair_x = None
+        self._crosshair_y = None
+        self._clear_crosshair()
+
+        # Notify callback with None to clear crosshairs in other viewers
+        if self._on_crosshair_move is not None:
+            self._on_crosshair_move(None, None)
+
+    def set_crosshair(self, x, y):
+        """Set crosshair position from external source (None to clear)."""
+        if x is None or y is None:
+            self.clear_crosshair()
+        else:
+            self._crosshair_x = x
+            self._crosshair_y = y
+            self._draw_crosshair()
+
+    def clear_crosshair(self):
+        """Clear the crosshair."""
+        self._crosshair_x = None
+        self._crosshair_y = None
+        self._clear_crosshair()
+
+    def _draw_crosshair(self):
+        """Draw crosshair at current position."""
+        self._clear_crosshair()
+
+        if self._crosshair_x is None or self._crosshair_y is None:
+            return
+
+        cw = self.canvas.winfo_width()
+        ch = self.canvas.winfo_height()
+
+        if cw <= 1 or ch <= 1:
+            return
+
+        x, y = self._crosshair_x, self._crosshair_y
+
+        # Draw horizontal line
+        h_line = self.canvas.create_line(
+            0, y, cw, y,
+            fill="#FFFFFF", width=1, dash=(4, 4), tags="crosshair"
+        )
+        # Draw vertical line
+        v_line = self.canvas.create_line(
+            x, 0, x, ch,
+            fill="#FFFFFF", width=1, dash=(4, 4), tags="crosshair"
+        )
+
+        self._crosshair_lines = [h_line, v_line]
+
+    def _clear_crosshair(self):
+        """Clear existing crosshair lines."""
+        for line_id in self._crosshair_lines:
+            try:
+                self.canvas.delete(line_id)
+            except Exception:
+                pass
+        self._crosshair_lines = []
+
+
 class AnyTrackApp(tb.Window):
+    # ROI color palette (up to 12 differentiable colors)
+    ROI_COLORS = [
+        "#FF8C00",  # orange (darkorange)
+        "#1E90FF",  # dodgerblue
+        "#32CD32",  # limegreen
+        "#FF1493",  # deeppink
+        "#FFD700",  # gold
+        "#9370DB",  # mediumpurple
+        "#00CED1",  # darkturquoise
+        "#FF6347",  # tomato
+        "#7FFF00",  # chartreuse
+        "#FF69B4",  # hotpink
+        "#00BFFF",  # deepskyblue
+        "#FFA500",  # orange
+    ]
+
     def __init__(self):
         super().__init__(themename="flatly")
         self.title("anytrack")
@@ -80,6 +410,13 @@ class AnyTrackApp(tb.Window):
         self._bg_dbg_indices_list = []          # list[int] sampled indices for current trial
         self._bg_dbg_cache = {}                # dict[int, dict] frame_idx -> {"frame": np.ndarray, "bg": np.ndarray}
 
+        # Tracking debug window
+        self.debug_tracking_var = tk.BooleanVar(value=False)
+        self._tracking_debug_win = None
+        self._tracking_debug_widgets = {}  # roi_name -> dict of widgets
+        self._open_tracking_debug_after_bg = False  # flag to open debug window after BG builds
+        self._syncing_sliders = False  # flag to prevent circular slider updates
+
         self._build_ui()
 
     def _apply_ui_fonts(self):
@@ -108,6 +445,7 @@ class AnyTrackApp(tb.Window):
         menubar.add_cascade(label="File", menu=filemenu)
         filemenu_debug = tk.Menu(menubar, tearoff=0)
         filemenu_debug.add_checkbutton(label="Background debug window", variable=self.debug_bg_var)
+        filemenu_debug.add_checkbutton(label="Tracking debug window", variable=self.debug_tracking_var, command=self._toggle_tracking_debug)
         menubar.add_cascade(label="Debug", menu=filemenu_debug)
         self.config(menu=menubar)
 
@@ -294,6 +632,15 @@ class AnyTrackApp(tb.Window):
         bgr = cv2.cvtColor(self._background_gray, cv2.COLOR_GRAY2BGR)
         self._last_disp_bgr = bgr
         self._render_bgr_to_canvas(bgr, resample="hq")
+
+        # Open tracking debug window if it was requested
+        if self._open_tracking_debug_after_bg:
+            self._open_tracking_debug_after_bg = False
+            # Switch back to video mode for tracking debug
+            self._set_preview_mode("video")
+            self.show_frame(self._current_frame_idx)
+            # Now open the tracking debug window
+            self._open_tracking_debug_window()
 
     def on_preview_resize(self, event):
         # Track latest preview size.
@@ -718,25 +1065,29 @@ class AnyTrackApp(tb.Window):
         if self.session and self.session.dataframe is not None and not self.session.dataframe.empty:
             df = self.session.dataframe
             fdf = df[df["frame"] == idx]
-            for _, r in fdf.iterrows():
-                x, y = int(r["x"]), int(r["y"])
-                cv2.circle(disp, (x, y), 4, (0, 0, 255), -1)
-                # angle arrow
-                ang = np.deg2rad(float(r["angle_deg"]))
-                x2 = int(x + 20 * np.cos(ang))
-                y2 = int(y + 20 * np.sin(ang))
-                cv2.line(disp, (x, y), (x2, y2), (255, 0, 0), 2)
             for each_roi in df.roi.unique():
                 roidf = df[df.roi == each_roi]
                 x,y = roidf.x.values, roidf.y.values
                 points = np.vstack([x[:idx],y[:idx]]).T
                 pts = points.astype(np.int32).reshape(-1,1,2) # now shape [3,1,2]
-                cv2.polylines(disp, [pts], isClosed=False, color=(255, 0, 255), thickness = 3)
+                #cv2.polylines(disp, [pts], isClosed=False, color=(255, 0, 255), thickness = 3)
+            for _, r in fdf.iterrows():
+                x, y = int(r["x"]), int(r["y"])
+                cv2.circle(disp, (x, y), 8, (255, 255, 0), 2)
+                # angle arrow
+                ang = np.deg2rad(float(r["angle_deg"]))
+                x2 = int(x + 20 * np.cos(ang))
+                y2 = int(y + 20 * np.sin(ang))
+                #cv2.line(disp, (x, y), (x2, y2), (255, 0, 0), 2)
 
         self._last_disp_bgr = disp
         self._render_bgr_to_canvas(disp, resample="hq")
         if getattr(self, "preview_mode", "video") == "video":
             self._update_frame_label()
+
+        # Update tracking debug window if open
+        if self._tracking_debug_widgets:
+            self._update_tracking_debug(frame, idx)
 
     def on_tree_double_click(self, event):
         iid = self.tree.identify_row(event.y)
@@ -1051,6 +1402,445 @@ class AnyTrackApp(tb.Window):
         if not payload:
             self._bg_dbg_status.configure(text=f"Waiting for debug data for frame {frame_idx}…")
             return
+
+    def _toggle_tracking_debug(self):
+        """Toggle tracking debug window on/off."""
+        if self.debug_tracking_var.get():
+            self._open_tracking_debug_window()
+        else:
+            self._close_tracking_debug_window()
+
+    def _open_tracking_debug_window(self):
+        """Open the tracking debug window showing ROI crops, diffs, masks, and metrics."""
+        if self._tracking_debug_win is not None and self._tracking_debug_win.winfo_exists():
+            self._tracking_debug_win.lift()
+            return
+
+        if not self.video or not self.video.rois:
+            messagebox.showinfo("anytrack", "Load a video with ROIs first to enable tracking debug.")
+            self.debug_tracking_var.set(False)
+            return
+
+        # Build background if not already available (needed for tracking debug)
+        if self._background_gray is None:
+            messagebox.showinfo(
+                "anytrack",
+                "Building background model for tracking debug.\nThis may take a moment..."
+            )
+            self._open_tracking_debug_after_bg = True
+            self._ensure_background_async()
+            # The window will be created after background is built
+            return
+
+        win = tk.Toplevel(self)
+        win.title("anytrack – Tracking Debug")
+        win.geometry("1400x900")
+        self._tracking_debug_win = win
+
+        # Main container
+        main_container = tb.Frame(win)
+        main_container.pack(fill="both", expand=True, padx=6, pady=6)
+        main_container.rowconfigure(0, weight=0)  # Frame slider
+        main_container.rowconfigure(1, weight=0)  # Background viewer
+        main_container.rowconfigure(2, weight=1)  # ROI scroll container
+        main_container.columnconfigure(0, weight=1)
+
+        # Frame slider at the top
+        slider_frame = tb.Frame(main_container)
+        slider_frame.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        slider_frame.columnconfigure(0, weight=1)
+
+        tb.Label(slider_frame, text="Frame:", font=("TkDefaultFont", 10)).grid(
+            row=0, column=0, sticky="w", padx=(0, 6)
+        )
+
+        self._debug_slider = tb.Scale(
+            slider_frame,
+            from_=0,
+            to=int(self.slider.cget("to")) if self.video else 0,
+            orient=HORIZONTAL,
+            command=self._on_debug_slider
+        )
+        self._debug_slider.grid(row=0, column=1, sticky="ew")
+        self._debug_slider.set(self._current_frame_idx)
+
+        self._debug_frame_label = tb.Label(
+            slider_frame,
+            text=f"Frame: {self._current_frame_idx}",
+            font=("TkFixedFont", 10),
+            width=20
+        )
+        self._debug_frame_label.grid(row=0, column=2, sticky="e", padx=(8, 0))
+
+        # Background viewer section
+        bg_viewer_frame = tb.Labelframe(main_container, text="Background Model", padding=6)
+        bg_viewer_frame.grid(row=1, column=0, sticky="ew", pady=(0, 6))
+        bg_viewer_frame.rowconfigure(0, weight=0, minsize=200)
+        bg_viewer_frame.columnconfigure(0, weight=1)
+
+        self._debug_bg_viewer = ZoomableImageViewer(bg_viewer_frame, bg="#2a2a2a")
+        self._debug_bg_viewer.canvas.grid(row=0, column=0, sticky="nsew")
+
+        # Will set background image with ROIs later (after ROI colors are assigned)
+        self._needs_bg_update = True
+
+        # Create a scrollable frame for multiple ROIs
+        scroll_container = tb.Frame(main_container)
+        scroll_container.grid(row=2, column=0, sticky="nsew")
+        scroll_container.rowconfigure(0, weight=1)
+        scroll_container.columnconfigure(0, weight=1)
+
+        canvas = tk.Canvas(scroll_container, bg="#f0f0f0")
+        scrollbar = tb.Scrollbar(scroll_container, orient="vertical", command=canvas.yview)
+        scrollable_frame = tb.Frame(canvas)
+
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        # Create debug panels for each ROI with color-coded labelframes
+        self._tracking_debug_widgets = {}
+        self._roi_colors = {}  # Store ROI -> color mapping
+        all_roi_viewers = []  # Collect all viewers for background crosshair sync
+        for i, roi in enumerate(self.video.rois):
+            # Assign color to this ROI
+            roi_color = self.ROI_COLORS[i % len(self.ROI_COLORS)]
+            self._roi_colors[roi.name] = roi_color
+
+            roi_frame = tb.Labelframe(
+                scrollable_frame,
+                text=f"ROI: {roi.name}",
+                padding=10,
+                bootstyle="primary"
+            )
+            roi_frame.grid(row=i, column=0, sticky="ew", padx=10, pady=10)
+
+            # Apply color styling to the labelframe
+            try:
+                roi_frame.configure(borderwidth=3, relief="solid")
+                # Create a custom style for this ROI
+                style_name = f"ROI{i}.TLabelframe"
+                self.style.configure(style_name, bordercolor=roi_color, borderwidth=3)
+                self.style.configure(f"{style_name}.Label", foreground=roi_color, font=("TkDefaultFont", 11, "bold"))
+                roi_frame.configure(style=style_name)
+            except Exception:
+                pass  # Fallback if styling fails
+
+            # Create grid for images: ROI Crop | Diff | Binary Mask
+            img_frame = tb.Frame(roi_frame, height=250)
+            img_frame.grid(row=0, column=0, sticky="ew")
+            img_frame.columnconfigure(0, weight=1)
+            img_frame.columnconfigure(1, weight=1)
+            img_frame.columnconfigure(2, weight=1)
+            img_frame.rowconfigure(0, weight=1, minsize=250)
+
+            # Create callbacks for syncing viewers
+            def make_sync_callback(viewers_list):
+                def on_view_change(zoom, pan_x, pan_y):
+                    # Sync all viewers in this ROI
+                    for v in viewers_list:
+                        v.set_view_from_sync(zoom, pan_x, pan_y)
+                return on_view_change
+
+            def make_crosshair_callback(viewers_list, source_viewer, bg_viewer=None, roi_obj=None):
+                def on_crosshair_move(canvas_x, canvas_y):
+                    # Sync crosshair across all viewers in this ROI (same canvas space)
+                    for v in viewers_list:
+                        if v is not source_viewer:
+                            v.set_crosshair(canvas_x, canvas_y)
+
+                    # Sync to background viewer using video pixel coordinates
+                    if bg_viewer is not None and bg_viewer is not source_viewer and roi_obj is not None:
+                        if canvas_x is not None and canvas_y is not None:
+                            # Convert from ROI-local canvas position to video pixel position
+                            # ROI offset in video coordinates
+                            x0 = int(max(0, roi_obj.cx - roi_obj.r))
+                            y0 = int(max(0, roi_obj.cy - roi_obj.r))
+
+                            # TODO: This is a simplified mapping assuming 1:1 canvas to ROI pixels
+                            # In reality, we'd need to account for zoom/pan in the viewer
+                            # For now, just pass the canvas coordinates to background viewer
+                            bg_viewer.set_crosshair(canvas_x, canvas_y)
+                        else:
+                            bg_viewer.set_crosshair(None, None)
+                return on_crosshair_move
+
+            # Temporary list to hold viewers for sync callback
+            roi_viewers = []
+
+            # ROI Crop
+            crop_lf = tb.Labelframe(img_frame, text="ROI Crop", padding=4)
+            crop_lf.grid(row=0, column=0, padx=4, pady=4, sticky="nsew")
+            crop_lf.rowconfigure(0, weight=1)
+            crop_lf.columnconfigure(0, weight=1)
+            crop_viewer = ZoomableImageViewer(crop_lf, bg="#2a2a2a")
+            crop_viewer.canvas.grid(row=0, column=0, sticky="nsew")
+            roi_viewers.append(crop_viewer)
+
+            # Background-subtracted diff
+            diff_lf = tb.Labelframe(img_frame, text="BG Subtracted", padding=4)
+            diff_lf.grid(row=0, column=1, padx=4, pady=4, sticky="nsew")
+            diff_lf.rowconfigure(0, weight=1)
+            diff_lf.columnconfigure(0, weight=1)
+            diff_viewer = ZoomableImageViewer(diff_lf, bg="#2a2a2a")
+            diff_viewer.canvas.grid(row=0, column=0, sticky="nsew")
+            roi_viewers.append(diff_viewer)
+
+            # Binary mask
+            mask_lf = tb.Labelframe(img_frame, text="Binary Mask", padding=4)
+            mask_lf.grid(row=0, column=2, padx=4, pady=4, sticky="nsew")
+            mask_lf.rowconfigure(0, weight=1)
+            mask_lf.columnconfigure(0, weight=1)
+            mask_viewer = ZoomableImageViewer(mask_lf, bg="#2a2a2a")
+            mask_viewer.canvas.grid(row=0, column=0, sticky="nsew")
+            roi_viewers.append(mask_viewer)
+
+            # Set up sync callbacks for all viewers in this ROI
+            sync_callback = make_sync_callback(roi_viewers)
+            for v in roi_viewers:
+                v._on_view_change = sync_callback
+                # Set up crosshair callback for each viewer (include background viewer)
+                v._on_crosshair_move = make_crosshair_callback(roi_viewers, v, self._debug_bg_viewer, roi)
+
+            # Collect all viewers for background viewer crosshair sync
+            all_roi_viewers.extend(roi_viewers)
+
+            # Metrics display
+            metrics_frame = tb.Frame(roi_frame)
+            metrics_frame.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+
+            metrics_text = tk.Text(metrics_frame, height=6, width=80, font=("TkFixedFont", 10))
+            metrics_text.pack(fill="both", expand=True)
+            metrics_text.insert("1.0", "No tracking data yet...\n")
+            metrics_text.configure(state="disabled")
+
+            self._tracking_debug_widgets[roi.name] = {
+                "crop_viewer": crop_viewer,
+                "diff_viewer": diff_viewer,
+                "mask_viewer": mask_viewer,
+                "metrics_text": metrics_text,
+            }
+
+        # Set up background viewer's crosshair callback to sync with all ROI viewers
+        if all_roi_viewers:
+            def bg_crosshair_callback(x, y):
+                # Sync crosshair to all ROI viewers
+                for v in all_roi_viewers:
+                    v.set_crosshair(x, y)
+            self._debug_bg_viewer._on_crosshair_move = bg_crosshair_callback
+
+        def on_close():
+            self.debug_tracking_var.set(False)
+            self._tracking_debug_win = None
+            self._tracking_debug_widgets = {}
+            self._debug_slider = None
+            self._debug_frame_label = None
+            self._debug_bg_viewer = None
+            win.destroy()
+
+        win.protocol("WM_DELETE_WINDOW", on_close)
+
+        # Update background viewer with ROI circles now that colors are assigned
+        if self._background_gray is not None and self._needs_bg_update:
+            self._update_debug_background()
+            self._needs_bg_update = False
+
+        # Trigger initial update if video is loaded
+        if self.video:
+            self.show_frame(self._current_frame_idx)
+
+    def _update_debug_background(self):
+        """Update background viewer with ROI circles drawn in their assigned colors."""
+        if self._background_gray is None or self._debug_bg_viewer is None:
+            return
+
+        # Convert background to BGR for drawing
+        bg_bgr = cv2.cvtColor(self._background_gray, cv2.COLOR_GRAY2BGR)
+
+        # Draw ROI circles with their assigned colors
+        if hasattr(self, '_roi_colors') and self.video and self.video.rois:
+            for roi in self.video.rois:
+                color_hex = self._roi_colors.get(roi.name, "#FFFFFF")
+                # Convert hex to BGR
+                color_rgb = tuple(int(color_hex[i:i+2], 16) for i in (1, 3, 5))
+                color_bgr = (color_rgb[2], color_rgb[1], color_rgb[0])  # RGB to BGR
+
+                # Draw ROI circle
+                cv2.circle(bg_bgr, (int(roi.cx), int(roi.cy)), int(roi.r), color_bgr, 3)
+                # Draw center point
+                cv2.circle(bg_bgr, (int(roi.cx), int(roi.cy)), 5, color_bgr, -1)
+
+                # Optionally draw ROI name
+                font = cv2.FONT_HERSHEY_SIMPLEX
+                text_pos = (int(roi.cx) - 20, int(roi.cy) - int(roi.r) - 10)
+                cv2.putText(bg_bgr, roi.name, text_pos, font, 0.6, color_bgr, 2)
+
+        self._debug_bg_viewer.set_image(bg_bgr)
+
+    def _close_tracking_debug_window(self):
+        """Close the tracking debug window."""
+        if self._tracking_debug_win is not None and self._tracking_debug_win.winfo_exists():
+            self._tracking_debug_win.destroy()
+        self._tracking_debug_win = None
+        self._tracking_debug_widgets = {}
+        self._debug_slider = None
+        self._debug_frame_label = None
+        self._debug_bg_viewer = None
+
+    def _on_debug_slider(self, val):
+        """Handle debug window frame slider changes."""
+        if self._syncing_sliders:
+            return
+        try:
+            idx = int(float(val))
+        except Exception:
+            return
+        # Update main app to show this frame
+        self._syncing_sliders = True
+        try:
+            self.slider.set(idx)
+            self.show_frame(idx)
+        finally:
+            self._syncing_sliders = False
+
+    def _update_tracking_debug(self, frame: np.ndarray, frame_idx: int):
+        """Update tracking debug window with current frame analysis."""
+        if not self._tracking_debug_widgets or not self.video or not self.video.rois:
+            return
+
+        if self._background_gray is None:
+            return  # Need background for debug
+
+        # Update debug slider and label if they exist (with guard to prevent circular updates)
+        if not self._syncing_sliders:
+            if hasattr(self, '_debug_slider') and self._debug_slider is not None:
+                try:
+                    self._syncing_sliders = True
+                    self._debug_slider.set(frame_idx)
+                finally:
+                    self._syncing_sliders = False
+            if hasattr(self, '_debug_frame_label') and self._debug_frame_label is not None:
+                try:
+                    self._debug_frame_label.configure(text=f"Frame: {frame_idx}")
+                except Exception:
+                    pass
+
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        kernel_open, kernel_close = _build_morph_kernels(self.cfg)
+
+        for roi in self.video.rois:
+            if roi.name not in self._tracking_debug_widgets:
+                continue
+
+            widgets = self._tracking_debug_widgets[roi.name]
+
+            # Extract ROI region
+            x0 = int(max(0, roi.cx - roi.r))
+            y0 = int(max(0, roi.cy - roi.r))
+            x1 = int(min(gray.shape[1], roi.cx + roi.r))
+            y1 = int(min(gray.shape[0], roi.cy + roi.r))
+
+            roi_gray = gray[y0:y1, x0:x1]
+            bg_roi = self._background_gray[y0:y1, x0:x1]
+
+            # Create mask for circular ROI
+            roi_shape = (y1 - y0, x1 - x0)
+            mask = roi_mask(roi_shape, roi, (x0, y0))
+
+            # Background subtraction - use same logic as tracking
+            bgdiff_type = getattr(self.cfg, 'bgdiff_type', 'dark')
+            if bgdiff_type == "dark":
+                # Only pixels darker than background
+                diff = cv2.subtract(bg_roi, roi_gray)
+            elif bgdiff_type == "bright":
+                # Only pixels brighter than background
+                diff = cv2.subtract(roi_gray, bg_roi)
+            else:  # "absolute"
+                # Absolute difference
+                diff = cv2.absdiff(roi_gray, bg_roi)
+
+            if mask is not None:
+                diff = cv2.bitwise_and(diff, diff, mask=mask)
+
+            # Binary mask
+            bw = _threshold_fg(diff, self.cfg, kernel_open, kernel_close)
+
+            # Extract ellipse candidates (this also uses bgdiff_type internally)
+            candidates = _extract_ellipses(roi_gray, bg_roi, self.cfg, mask, kernel_open, kernel_close)
+
+            # Get ROI color for drawing
+            roi_color_hex = self._roi_colors.get(roi.name, "#FFFFFF")
+            # Convert hex to BGR
+            roi_color_rgb = tuple(int(roi_color_hex[i:i+2], 16) for i in (1, 3, 5))
+            roi_color_bgr = (roi_color_rgb[2], roi_color_rgb[1], roi_color_rgb[0])
+
+            # Create visualizations
+            # 1. ROI crop with detected centroid
+            roi_vis = cv2.cvtColor(roi_gray, cv2.COLOR_GRAY2BGR)
+            if candidates:
+                best = candidates[0]
+                cv2.circle(roi_vis, (int(best.x), int(best.y)), 4, (0, 255, 0), -1)
+                cv2.ellipse(roi_vis, (int(best.x), int(best.y)),
+                           (int(best.major/2), int(best.minor/2)),
+                           best.angle_deg, 0, 360, (255, 0, 0), 2)
+
+            # 2. Diff image (colorized for visibility)
+            diff_vis = cv2.applyColorMap(diff, cv2.COLORMAP_HOT)
+
+            # 3. Binary mask (as BGR for consistency) with contours and ellipses
+            bw_vis = cv2.cvtColor(bw, cv2.COLOR_GRAY2BGR)
+
+            # Draw all detected contours and fitted ellipses in ROI color
+            if candidates:
+                for cand in candidates:
+                    # Draw contour if available
+                    if hasattr(cand, 'contour') and cand.contour is not None:
+                        #cv2.drawContours(bw_vis, [cand.contour], -1, roi_color_bgr, 2)
+                        ellipse = cv2.fitEllipse(cand.contour)
+                        # ellipse is a RotatedRect: ((center_x, center_y), (major_axis, minor_axis), angle)
+                        cv2.ellipse(bw_vis, ellipse, roi_color_bgr, 1) # Draw green ellipse on original image
+
+
+                    # Draw fitted ellipse
+                    """
+                    cv2.ellipse(bw_vis, (int(cand.x), int(cand.y)),
+                               (int(cand.major/2), int(cand.minor/2)),
+                               cand.angle_deg, 0, 360, roi_color_bgr, 2)
+                    """
+
+            # Update viewers with new images (they handle scaling automatically)
+            widgets["crop_viewer"].set_image(roi_vis)
+            widgets["diff_viewer"].set_image(diff_vis)
+            widgets["mask_viewer"].set_image(bw_vis)
+
+            # Update metrics text
+            metrics_text = widgets["metrics_text"]
+            metrics_text.configure(state="normal")
+            metrics_text.delete("1.0", "end")
+
+            metrics_text.insert("end", f"Frame: {frame_idx}\n")
+            metrics_text.insert("end", f"ROI Position: ({int(roi.cx)}, {int(roi.cy)}) r={int(roi.r)}\n")
+            metrics_text.insert("end", f"Candidates detected: {len(candidates)}\n")
+
+            if candidates:
+                best = candidates[0]
+                metrics_text.insert("end", f"\nBest Match:\n")
+                metrics_text.insert("end", f"  Position: ({best.x + x0:.1f}, {best.y + y0:.1f})\n")
+                metrics_text.insert("end", f"  Area: {best.area:.1f} px²\n")
+                metrics_text.insert("end", f"  Angle: {best.angle_deg:.1f}°\n")
+                metrics_text.insert("end", f"  Axes: {best.major:.1f} x {best.minor:.1f}\n")
+            else:
+                metrics_text.insert("end", f"\n⚠ No valid candidates found!\n")
+                metrics_text.insert("end", f"  Check threshold and area limits.\n")
+
+            metrics_text.configure(state="disabled")
 
     def _track_poll(self):
         """Poll the tracking event queue and update the modal progress dialog."""

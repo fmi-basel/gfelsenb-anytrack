@@ -79,7 +79,18 @@ def _extract_ellipses(
     kernel_open: Optional[np.ndarray] = None,
     kernel_close: Optional[np.ndarray] = None,
 ) -> List[EllipseCandidate]:
-    diff = cv2.absdiff(roi_gray, bg_roi_gray)
+    # Compute background difference based on type
+    bgdiff_type = getattr(cfg, 'bgdiff_type', 'dark')
+    if bgdiff_type == "dark":
+        # Only pixels darker than background
+        diff = cv2.subtract(bg_roi_gray, roi_gray)
+    elif bgdiff_type == "bright":
+        # Only pixels brighter than background
+        diff = cv2.subtract(roi_gray, bg_roi_gray)
+    else:  # "absolute"
+        # Absolute difference (original behavior)
+        diff = cv2.absdiff(roi_gray, bg_roi_gray)
+
     if mask is not None:
         diff = cv2.bitwise_and(diff, diff, mask=mask)
     bw = _threshold_fg(diff, cfg, kernel_open, kernel_close)
@@ -95,8 +106,10 @@ def _extract_ellipses(
         (x, y), (MA, ma), angle = cv2.fitEllipse(c)
         major = float(max(MA, ma))
         minor = float(min(MA, ma))
+        # Fix angle: OpenCV has y-axis flipped, so geometric angle = -opencv_angle (in degrees)
+        geometric_angle = (-float(angle)) % 360.0
         cand.append(EllipseCandidate(
-            x=float(x), y=float(y), angle_deg=float(angle),
+            x=float(x), y=float(y), angle_deg=geometric_angle,
             major=major, minor=minor, area=area, contour=c
         ))
     # Sort: largest area first (often best)

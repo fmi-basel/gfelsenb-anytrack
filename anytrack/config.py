@@ -47,8 +47,9 @@ class AnyTrackConfig:
     max_radius_ratio: float = 0.3
 
     # Tracking
-    thr_method: str = "otsu"  # otsu or fixed
-    thr_fixed: int = 35
+    bgdiff_type: str = "dark"  # dark (default), bright, or absolute
+    thr_method: str = "fixed"  # otsu or fixed
+    thr_fixed: int = 15
     morph_open: int = 3
     morph_close: int = 5
     max_centroids_per_roi: int = 1
