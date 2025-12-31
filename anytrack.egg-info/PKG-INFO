@@ -12,6 +12,9 @@ Requires-Dist: ttkbootstrap>=1.10
 Requires-Dist: tksheet>=7.0
 Requires-Dist: platformdirs>=4.0
 Requires-Dist: tqdm>=4.67.1
+Requires-Dist: matplotlib>=3.10.8
+Requires-Dist: pyarrow>=22.0.0
+Requires-Dist: scikit-learn>=1.7.2
 
 # anytrack (skeleton)
 

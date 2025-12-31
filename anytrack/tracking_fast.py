@@ -25,6 +25,7 @@ class _EllipseCandidate:
     x: float
     y: float
     angle_deg: float
+    cv_angle_deg: float
     major: float
     minor: float
     area: float
@@ -102,12 +103,13 @@ def _extract_ellipses(
         major = float(max(MA, ma))
         minor = float(min(MA, ma))
         # Fix angle: OpenCV has y-axis flipped, so geometric angle = -opencv_angle (in radians)
-        geometric_angle = -float(angle) % (2.*np.pi)
+        geometric_angle = angle - 90
 
         candidates.append(_EllipseCandidate(
             x=float(x),
             y=float(y),
             angle_deg=geometric_angle,
+            cv_angle_deg=angle,
             major=major,
             minor=minor,
             area=area,
@@ -173,16 +175,16 @@ def track_roi_video(
     else:
         bg_model = build_background(
             str(roi_video_path),
-            method=cfg.bg_method,
-            k_min=cfg.bg_min_frames,
-            k_max=cfg.bg_max_frames,
-            converge_eps=cfg.bg_converge_eps,
-            fg_thresh=cfg.bg_fg_thresh,
-            inpaint_ghosts=cfg.bg_inpaint_ghosts,
-            ghost_area_min=cfg.bg_ghost_area_min,
-            ghost_area_max=cfg.bg_ghost_area_max,
+            n_samples=cfg.gmm_n_samples,
+            bic_improvement=cfg.gmm_bic_improvement,
+            min_std=cfg.gmm_min_std,
+            reg_covar=cfg.gmm_reg_covar,
+            lowp=cfg.gmm_lowp,
+            arena_detection=False,  # No arena detection for individual ROI videos
+            arena_min_area_frac=cfg.arena_min_area_frac,
+            arena_blur_sigma=0.0,  # No blur for ROI videos
         )
-        bg = bg_model.image
+        bg = bg_model.gmm
 
     # Pre-allocate morphology kernels
     kernel_open = None
@@ -270,6 +272,7 @@ def track_roi_video(
             x=float(x_f * scale + x0),
             y=float(y_f * scale + y0),
             angle_deg=float(chosen.angle_deg),
+            cv_angle_deg=float(chosen.cv_angle_deg),
             major=float(chosen.major * scale),
             minor=float(chosen.minor * scale),
             area=float(chosen.area * scale * scale),

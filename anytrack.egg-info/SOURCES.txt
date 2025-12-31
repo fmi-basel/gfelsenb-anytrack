@@ -10,6 +10,7 @@ anytrack/models.py
 anytrack/preprocess.py
 anytrack/roi.py
 anytrack/session.py
+anytrack/test_gmm_bg.py
 anytrack/tracking.py
 anytrack/tracking_fast.py
 anytrack/trajectory.py

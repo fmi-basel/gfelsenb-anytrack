@@ -45,6 +45,7 @@ class EllipseObservation:
     x: float
     y: float
     angle_deg: float
+    cv_angle_deg: float
     major: float
     minor: float
     area: float

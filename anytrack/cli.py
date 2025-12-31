@@ -403,14 +403,17 @@ def roi_main():
 
     parser = argparse.ArgumentParser(prog="anytrack-roi", description="Debug anytrack ROI (arena) detection.")
     parser.add_argument("video", nargs="?", help="Path to AVI video (used to compute background)")
-    parser.add_argument("--bg-method", default="mean_excluding_fg",
-                        choices=["mean_excluding_fg", "mean", "median", "mog2"],
-                        help="Background method for building a model image")
-    parser.add_argument("--bg-k-min", type=int, default=30)
-    parser.add_argument("--bg-k-max", type=int, default=300)
-    parser.add_argument("--bg-eps", type=float, default=2.5)
-    parser.add_argument("--bg-fg-thresh", type=int, default=25)
-    parser.add_argument("--no-inpaint", action="store_true")
+    # GMM Background parameters
+    parser.add_argument("--gmm-n-samples", type=int, default=100,
+                        help="Number of frames to sample for GMM background")
+    parser.add_argument("--gmm-bic-improvement", type=float, default=10.0,
+                        help="BIC improvement threshold for 2-component GMM")
+    parser.add_argument("--gmm-min-std", type=float, default=10.0,
+                        help="Minimum std deviation to fit GMM")
+    parser.add_argument("--gmm-lowp", type=float, default=120.0,
+                        help="Minimum brightness value for background")
+    parser.add_argument("--arena-blur-sigma", type=float, default=3.0,
+                        help="Gaussian blur sigma within detected arenas")
 
     args = parser.parse_args()
 
@@ -544,15 +547,15 @@ def roi_main():
                 try:
                     model = build_background(
                         args.video,
-                        method=args.bg_method,
-                        k_min=args.bg_k_min,
-                        k_max=args.bg_k_max,
-                        converge_eps=args.bg_eps,
-                        fg_thresh=args.bg_fg_thresh,
-                        inpaint_ghosts=(not args.no_inpaint),
+                        n_samples=args.gmm_n_samples,
+                        bic_improvement=args.gmm_bic_improvement,
+                        min_std=args.gmm_min_std,
+                        lowp=args.gmm_lowp,
+                        arena_detection=True,
+                        arena_blur_sigma=args.arena_blur_sigma,
                         debug=False,
                     )
-                    self.q.put(("bg", model.image))
+                    self.q.put(("bg", model.gmm))
                 except Exception as e:
                     self.q.put(("err", str(e)))
 

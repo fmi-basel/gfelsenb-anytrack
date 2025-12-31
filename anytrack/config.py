@@ -28,15 +28,17 @@ def _dump_toml(d: Dict[str, Any]) -> str:
 
 @dataclass
 class AnyTrackConfig:
-    # Background modelling
-    bg_method: str = "mean_excluding_fg"  # mean, median, mean_excluding_fg, mog2
-    bg_max_frames: int = 300              # upper bound for sampling
-    bg_min_frames: int = 30               # lower bound for sampling
-    bg_converge_eps: float = 2.5          # stop when mean abs diff between successive bg < eps
-    bg_fg_thresh: int = 25                # threshold for excluding moving pixels in mean_excluding_fg
-    bg_inpaint_ghosts: bool = True
-    bg_ghost_area_min: int = 20
-    bg_ghost_area_max: int = 600
+    # GMM Background modeling
+    gmm_n_samples: int = 100                # Number of frames to sample for background
+    gmm_bic_improvement: float = 10.0       # BIC improvement threshold for 2-component GMM
+    gmm_min_std: float = 10.0               # Minimum std deviation to fit GMM (skip uniform pixels)
+    gmm_reg_covar: float = 1e-3             # Covariance regularization for GMM fitting
+    gmm_lowp: float = 120.0                 # Minimum brightness value for background
+
+    # Arena detection
+    arena_detection_enabled: bool = True    # Automatically detect arenas during background build
+    arena_min_area_frac: float = 0.01       # Minimum arena area as fraction of image size
+    arena_blur_sigma: float = 3.0           # Gaussian blur sigma within detected arenas
 
     # ROI detection (Hough)
     roi_hough_dp: float = 1.2
@@ -66,6 +68,7 @@ class AnyTrackConfig:
 
     # GUI
     preview_downscale: float = 1.0  # set <1 for speed on large frames
+    trajectory_alpha: float = 0.5  # alpha transparency for trajectory overlay (0.0-1.0)
 
     # Fast mode (parallel ROI tracking with FFmpeg preprocessing)
     fast_mode: bool = True
@@ -87,12 +90,33 @@ def load_config() -> AnyTrackConfig:
         save_config(cfg)
         return cfg
     data = tomllib.loads(path.read_text(encoding="utf-8"))
+
+    # Config migration: detect old background parameters and remove them
+    old_bg_params = [
+        'bg_method', 'bg_brightness_threshold', 'bg_converge_eps',
+        'bg_fg_thresh', 'bg_inpaint_ghosts', 'bg_ghost_area_min',
+        'bg_ghost_area_max', 'bg_min_frames', 'bg_max_frames'
+    ]
+    needs_migration = any(k in data for k in old_bg_params)
+    if needs_migration:
+        print("Migrating config from old background system to GMM background system...")
+        for k in old_bg_params:
+            data.pop(k, None)
+
     # tolerate unknown keys
     kwargs: Dict[str, Any] = asdict(AnyTrackConfig())
     for k, v in data.items():
         if k in kwargs:
             kwargs[k] = v
-    return AnyTrackConfig(**kwargs)
+
+    cfg = AnyTrackConfig(**kwargs)
+
+    # Save migrated config
+    if needs_migration:
+        save_config(cfg)
+        print("Config migration complete. New GMM parameters applied.")
+
+    return cfg
 
 def save_config(cfg: AnyTrackConfig) -> None:
     path = config_path()

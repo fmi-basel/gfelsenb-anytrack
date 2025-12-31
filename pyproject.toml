@@ -13,6 +13,9 @@ dependencies = [
   "tksheet>=7.0",
   "platformdirs>=4.0",
   "tqdm>=4.67.1",
+  "matplotlib>=3.10.8",
+  "pyarrow>=22.0.0",
+  "scikit-learn>=1.7.2",
 ]
 
 [project.scripts]

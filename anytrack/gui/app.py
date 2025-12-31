@@ -18,7 +18,7 @@ from tksheet import Sheet
 
 from ..config import load_config, save_config, AnyTrackConfig
 from ..io import load_video_asset
-from ..background import build_background
+from ..background import build_background, BackgroundModel
 from ..roi import detect_circular_rois, roi_mask
 from ..session import TrackingSession
 from ..models import VideoAsset, TrackingResult
@@ -382,7 +382,8 @@ class AnyTrackApp(tb.Window):
         self._final_redraw_job = None  # scheduled final HQ redraw after resizing stops
         self._final_redraw_delay_ms = 180  # debounce delay for HQ redraw
 
-        self._background_gray: Optional[np.ndarray] = None  # cached background (grayscale)
+        self._background_gray: Optional[np.ndarray] = None  # cached background (grayscale) - points to model.gmm
+        self._background_model: Optional[BackgroundModel] = None  # Full background model (average, gmm, thresholds, arenas)
         self.preview_mode: str = "video"  # "video" or "background"
         self._background_building: bool = False  # guard against concurrent background builds
 
@@ -405,10 +406,6 @@ class AnyTrackApp(tb.Window):
         self._bg_debug_win = None
         self._bg_debug_q: Optional[queue.Queue] = None
         self._bg_debug_job = None
-        self._bg_dbg_frame_img = None
-        self._bg_dbg_model_img = None
-        self._bg_dbg_indices_list = []          # list[int] sampled indices for current trial
-        self._bg_dbg_cache = {}                # dict[int, dict] frame_idx -> {"frame": np.ndarray, "bg": np.ndarray}
 
         # Tracking debug window
         self.debug_tracking_var = tk.BooleanVar(value=False)
@@ -417,7 +414,16 @@ class AnyTrackApp(tb.Window):
         self._open_tracking_debug_after_bg = False  # flag to open debug window after BG builds
         self._syncing_sliders = False  # flag to prevent circular slider updates
 
+        # ROI colors (shared between main view and debug window)
+        self._roi_colors = {}  # roi_name -> hex color
+
         self._build_ui()
+
+        # Register close handler
+        self.protocol("WM_DELETE_WINDOW", self._on_closing)
+
+        # Load previous session
+        self.after(100, self._load_session)
 
     def _apply_ui_fonts(self):
         """Apply centralized font sizing to key ttk widget styles."""
@@ -431,6 +437,13 @@ class AnyTrackApp(tb.Window):
         except Exception:
             # If style isn't ready for some reason, fail silently.
             pass
+
+    def _assign_roi_colors(self):
+        """Assign colors to ROIs from the color palette."""
+        self._roi_colors = {}
+        if self.video and self.video.rois:
+            for i, roi in enumerate(self.video.rois):
+                self._roi_colors[roi.name] = self.ROI_COLORS[i % len(self.ROI_COLORS)]
 
     def _build_ui(self):
         # Top menu
@@ -591,32 +604,30 @@ class AnyTrackApp(tb.Window):
             return
         self._background_building = True
 
-        dbg_enabled = bool(self.debug_bg_var.get())
-        if dbg_enabled:
-            self._open_bg_debug_window()
+        # Always open debug window for background building
+        dbg_enabled = True
+        self._open_bg_debug_window()
 
         def dbg_hook(event: str, payload: dict):
-            if dbg_enabled:
-                self._bg_debug_enqueue(event, payload)
+            self._bg_debug_enqueue(event, payload)
 
         def worker():
             try:
-                bg = build_background(
+                bg_model = build_background(
                     str(self.video.video_path),
-                    method=self.cfg.bg_method,
-                    k_min=max(10, self.cfg.bg_min_frames // 3),
-                    k_max=max(60, self.cfg.bg_min_frames),
-                    converge_eps=self.cfg.bg_converge_eps,
-                    fg_thresh=self.cfg.bg_fg_thresh,
-                    inpaint_ghosts=self.cfg.bg_inpaint_ghosts,
-                    ghost_area_min=self.cfg.bg_ghost_area_min,
-                    ghost_area_max=self.cfg.bg_ghost_area_max,
+                    n_samples=self.cfg.gmm_n_samples,
+                    bic_improvement=self.cfg.gmm_bic_improvement,
+                    min_std=self.cfg.gmm_min_std,
+                    reg_covar=self.cfg.gmm_reg_covar,
+                    lowp=self.cfg.gmm_lowp,
+                    arena_detection=self.cfg.arena_detection_enabled,
+                    arena_min_area_frac=self.cfg.arena_min_area_frac,
+                    arena_blur_sigma=self.cfg.arena_blur_sigma,
                     debug=dbg_enabled,
                     debug_hook=dbg_hook,
-                    debug_stride=3,
-                    debug_max_side=480,
-                ).image
-                self._background_gray = bg
+                )
+                self._background_model = bg_model
+                self._background_gray = bg_model.gmm
                 self.after(0, self.show_background)
             except Exception as e:
                 self.after(0, lambda: messagebox.showerror("anytrack", f"Background build failed:\n{e}"))
@@ -755,6 +766,7 @@ class AnyTrackApp(tb.Window):
         self._background_gray = None
         self._set_preview_mode("video")
         self._background_building = False
+        self._assign_roi_colors()  # Assign colors to ROIs
         self._open_capture()
         self._populate_tree()
         self._set_slider_range()
@@ -1058,27 +1070,55 @@ class AnyTrackApp(tb.Window):
         # Overlay ROIs + tracked centroids if available
         disp = frame.copy()
 
+        # Draw ROI circles with their assigned colors
         if self.video:
             for roi in self.video.rois:
-                cv2.circle(disp, (int(roi.cx), int(roi.cy)), int(roi.r), (0, 255, 0), 2)
+                roi_color_hex = self._roi_colors.get(roi.name, "#00FF00")
+                # Convert hex to BGR
+                roi_color_rgb = tuple(int(roi_color_hex[i:i+2], 16) for i in (1, 3, 5))
+                roi_color_bgr = (roi_color_rgb[2], roi_color_rgb[1], roi_color_rgb[0])
+                cv2.circle(disp, (int(roi.cx), int(roi.cy)), int(roi.r), roi_color_bgr, 2)
 
+        # Draw trajectories with alpha blending
         if self.session and self.session.dataframe is not None and not self.session.dataframe.empty:
             df = self.session.dataframe
             fdf = df[df["frame"] == idx]
+
+            # Create overlay for alpha-blended trajectories
+            trajectory_alpha = getattr(self.cfg, 'trajectory_alpha', 0.5)
+            overlay = disp.copy()
+
             for each_roi in df.roi.unique():
                 roidf = df[df.roi == each_roi]
-                x,y = roidf.x.values, roidf.y.values
-                points = np.vstack([x[:idx],y[:idx]]).T
-                pts = points.astype(np.int32).reshape(-1,1,2) # now shape [3,1,2]
-                #cv2.polylines(disp, [pts], isClosed=False, color=(255, 0, 255), thickness = 3)
+                x, y = roidf.x.values, roidf.y.values
+                points = np.vstack([x[:idx], y[:idx]]).T
+                pts = points.astype(np.int32).reshape(-1, 1, 2)
+
+                # Get ROI color
+                roi_color_hex = self._roi_colors.get(each_roi, "#FF00FF")
+                roi_color_rgb = tuple(int(roi_color_hex[i:i+2], 16) for i in (1, 3, 5))
+                roi_color_bgr = (roi_color_rgb[2], roi_color_rgb[1], roi_color_rgb[0])
+
+                # Draw trajectory on overlay
+                cv2.polylines(overlay, [pts], isClosed=False, color=roi_color_bgr, thickness=3)
+
+            # Blend overlay with original using alpha
+            cv2.addWeighted(overlay, trajectory_alpha, disp, 1 - trajectory_alpha, 0, disp)
+
+            # Draw current positions (not alpha-blended)
             for _, r in fdf.iterrows():
                 x, y = int(r["x"]), int(r["y"])
-                cv2.circle(disp, (x, y), 8, (255, 255, 0), 2)
+                roi_name = r["roi"]
+                roi_color_hex = self._roi_colors.get(roi_name, "#FFFF00")
+                roi_color_rgb = tuple(int(roi_color_hex[i:i+2], 16) for i in (1, 3, 5))
+                roi_color_bgr = (roi_color_rgb[2], roi_color_rgb[1], roi_color_rgb[0])
+
+                cv2.circle(disp, (x, y), 8, roi_color_bgr, 2)
                 # angle arrow
                 ang = np.deg2rad(float(r["angle_deg"]))
                 x2 = int(x + 20 * np.cos(ang))
                 y2 = int(y + 20 * np.sin(ang))
-                #cv2.line(disp, (x, y), (x2, y2), (255, 0, 0), 2)
+                cv2.line(disp, (x, y), (x2, y2), roi_color_bgr, 2)
 
         self._last_disp_bgr = disp
         self._render_bgr_to_canvas(disp, resample="hq")
@@ -1119,39 +1159,245 @@ class AnyTrackApp(tb.Window):
         pass
 
     def auto_rois(self):
+        """Auto-detect ROIs with arena detection and progress dialog."""
         if not self.video:
             messagebox.showwarning("anytrack", "Open a video first.")
             return
+
+        # Create event queue and cancel event for inter-thread communication
+        q = queue.Queue(maxsize=200)
+        cancel_event = threading.Event()
+        hook = make_progress_hook(q)
+
+        # Create and show modal progress dialog
+        dialog = TrackingProgressDialog(self, q, cancel_event, title="Detecting ROIs")
+
+        def worker():
+            try:
+                # Build background with arena detection
+                bg_model = build_background(
+                    str(self.video.video_path),
+                    n_samples=self.cfg.gmm_n_samples,
+                    bic_improvement=self.cfg.gmm_bic_improvement,
+                    min_std=self.cfg.gmm_min_std,
+                    reg_covar=self.cfg.gmm_reg_covar,
+                    lowp=self.cfg.gmm_lowp,
+                    arena_detection=True,  # Force arena detection for auto ROI
+                    arena_min_area_frac=self.cfg.arena_min_area_frac,
+                    arena_blur_sigma=self.cfg.arena_blur_sigma,
+                    debug=True,  # Enable debug events
+                    debug_hook=hook,
+                )
+
+                # Send completion event with background model
+                hook("done", {"bg_model": bg_model})
+
+            except Exception as e:
+                # Send error event
+                try:
+                    if q.full():
+                        try:
+                            q.get_nowait()
+                        except Exception:
+                            pass
+                    q.put_nowait(("error", {"exc": repr(e)}))
+                except Exception:
+                    pass
+
+        threading.Thread(target=worker, daemon=True).start()
+
+        # Start polling the queue for progress events
+        self._auto_rois_q = q
+        self._auto_rois_dialog = dialog
+        self._auto_rois_cancel_event = cancel_event
+        self._auto_rois_job = self.after(50, self._auto_rois_poll)
+
+    def _auto_rois_poll(self):
+        """Poll the ROI detection event queue and update the modal progress dialog."""
+        q = getattr(self, "_auto_rois_q", None)
+        dialog = getattr(self, "_auto_rois_dialog", None)
+        if dialog is None or q is None:
+            return
+
         try:
-            # build background quickly for ROI detection
-            bg = build_background(
-                str(self.video.video_path),
-                method=self.cfg.bg_method,
-                k_min=max(10, self.cfg.bg_min_frames//3),
-                k_max=max(60, self.cfg.bg_min_frames),
-                converge_eps=self.cfg.bg_converge_eps,
-                fg_thresh=self.cfg.bg_fg_thresh,
-                inpaint_ghosts=self.cfg.bg_inpaint_ghosts,
-                ghost_area_min=self.cfg.bg_ghost_area_min,
-                ghost_area_max=self.cfg.bg_ghost_area_max,
-            ).image
-            rois = detect_circular_rois(
-                bg,
-                dp=self.cfg.roi_hough_dp,
-                min_dist_ratio=self.cfg.roi_hough_min_dist_ratio,
-                param1=self.cfg.roi_hough_param1,
-                param2=self.cfg.roi_hough_param2,
-                min_radius_ratio=self.cfg.min_radius_ratio,
-                max_radius_ratio=self.cfg.max_radius_ratio,
-            )
-            if not rois:
-                messagebox.showinfo("anytrack", "No circles detected. Consider adjusting Hough params or manual ROIs.")
-                return
-            self.video.rois = rois
-            self._populate_tree()
-            self.show_frame(self._current_frame_idx)
-        except Exception as e:
-            messagebox.showerror("anytrack", f"ROI detection failed:\n{e}")
+            while True:
+                event, payload = q.get_nowait()
+
+                if event == "sampling_progress":
+                    # Sampling frames: 0-20% of total progress
+                    step = payload.get("step", 0)
+                    total = payload.get("total", 1)
+                    pct = (step / total) * 0.20  # 0-20% range
+
+                    # Initialize ETA estimator on first event
+                    if not hasattr(self, "_auto_rois_eta"):
+                        self._auto_rois_eta = ETAEstimator()
+                        self._auto_rois_eta.start()
+                        # Calculate total work based on video dimensions if available
+                        if self.video and self.video.width and self.video.height:
+                            total_pixels = self.video.width * self.video.height
+                        else:
+                            # Conservative estimate for 1920x1080
+                            total_pixels = 1920 * 1080
+                        # Total work = sampling steps + GMM pixels (GMM dominates)
+                        self._auto_rois_total_work = total + total_pixels
+                        self._auto_rois_n_samples = total
+
+                    self._auto_rois_eta.update(step)
+                    eta_s = self._auto_rois_eta.eta_seconds(self._auto_rois_total_work, step)
+                    eta_text = self._auto_rois_eta.format_seconds(eta_s)
+
+                    status_text = f"Sampling frames {step}/{total}  {pct*100:.1f}%  ETA {eta_text}"
+                    dialog.update_progress(pct, text=status_text)
+
+                elif event == "average_complete":
+                    # Average complete: 20% progress
+                    pct = 0.20
+                    status_text = f"Computing GMM background...  {pct*100:.1f}%"
+                    dialog.update_progress(pct, text=status_text)
+
+                elif event == "gmm_progress":
+                    # GMM fitting: 20-90% of total progress (main workload)
+                    percent = payload.get("percent", 0.0)  # 0-100
+                    pct = 0.20 + (percent / 100.0) * 0.70  # Map to 20-90% range
+                    pixel = payload.get("pixel", 0)
+                    total = payload.get("total", 1)
+
+                    # Update ETA with pixel progress
+                    if hasattr(self, "_auto_rois_eta") and hasattr(self, "_auto_rois_n_samples"):
+                        # Add sampling offset to pixel count
+                        work_done = self._auto_rois_n_samples + pixel
+                        self._auto_rois_eta.update(work_done)
+                        eta_s = self._auto_rois_eta.eta_seconds(self._auto_rois_total_work, work_done)
+                        eta_text = self._auto_rois_eta.format_seconds(eta_s)
+                    else:
+                        eta_text = "--:--"
+
+                    status_text = f"Fitting GMM models {pixel}/{total}  {pct*100:.1f}%  ETA {eta_text}"
+                    dialog.update_progress(pct, text=status_text)
+
+                elif event == "gmm_complete":
+                    # GMM complete: 90% progress
+                    pct = 0.90
+                    status_text = f"Detecting arenas...  {pct*100:.1f}%"
+                    dialog.update_progress(pct, text=status_text)
+
+                elif event == "arenas_detected":
+                    # Arenas detected: 95% progress
+                    pct = 0.95
+                    circles = payload.get("circles", [])
+                    status_text = f"Found {len(circles)} arenas, applying blur...  {pct*100:.1f}%"
+                    dialog.update_progress(pct, text=status_text)
+
+                elif event == "blur_complete":
+                    # Blur complete: 100% progress
+                    pct = 1.0
+                    status_text = f"Complete!  {pct*100:.1f}%"
+                    dialog.update_progress(pct, text=status_text)
+
+                elif event == "done":
+                    # Background building complete, process results
+                    try:
+                        dialog.close()
+                    except Exception:
+                        pass
+
+                    try:
+                        bg_model = payload.get("bg_model")
+                        if bg_model is None:
+                            raise ValueError("No background model returned")
+
+                        # Use detected arenas as ROIs if available
+                        if bg_model.arena_circles and len(bg_model.arena_circles) > 0:
+                            from ..models import CircleROI
+                            self.video.rois = [
+                                CircleROI(
+                                    name=f"arena_{i+1:02d}",
+                                    cx=cx, cy=cy, r=r
+                                )
+                                for i, (cx, cy, r) in enumerate(bg_model.arena_circles)
+                            ]
+                            self._background_model = bg_model
+                            self._background_gray = bg_model.gmm
+                            self._assign_roi_colors()
+                            self._populate_tree()
+                            self.show_background()
+                            return
+
+                        # Fallback to HoughCircles if arena detection didn't find enough arenas
+                        bg = bg_model.gmm
+                        rois = detect_circular_rois(
+                            bg,
+                            dp=self.cfg.roi_hough_dp,
+                            min_dist_ratio=self.cfg.roi_hough_min_dist_ratio,
+                            param1=self.cfg.roi_hough_param1,
+                            param2=self.cfg.roi_hough_param2,
+                            min_radius_ratio=self.cfg.min_radius_ratio,
+                            max_radius_ratio=self.cfg.max_radius_ratio,
+                        )
+                        if not rois:
+                            messagebox.showinfo("anytrack", "No circles detected. Consider adjusting Hough params or manual ROIs.")
+                            return
+
+                        self.video.rois = rois
+                        self._background_model = bg_model
+                        self._background_gray = bg_model.gmm
+                        self._assign_roi_colors()
+                        self._populate_tree()
+                        self.show_frame(self._current_frame_idx)
+
+                    except Exception as e:
+                        messagebox.showerror("anytrack", f"Error processing ROI results:\n{e}")
+                    finally:
+                        # Clean up ETA estimator
+                        if hasattr(self, "_auto_rois_eta"):
+                            delattr(self, "_auto_rois_eta")
+                        if hasattr(self, "_auto_rois_total_work"):
+                            delattr(self, "_auto_rois_total_work")
+                        if hasattr(self, "_auto_rois_n_samples"):
+                            delattr(self, "_auto_rois_n_samples")
+                    return
+
+                elif event == "error":
+                    try:
+                        dialog.set_error("Error during ROI detection")
+                    except Exception:
+                        pass
+                    try:
+                        exc = payload.get("exc")
+                        messagebox.showerror("anytrack", f"ROI detection failed:\n{exc}")
+                    except Exception:
+                        pass
+                    try:
+                        dialog.close()
+                    except Exception:
+                        pass
+                    finally:
+                        # Clean up ETA estimator
+                        if hasattr(self, "_auto_rois_eta"):
+                            delattr(self, "_auto_rois_eta")
+                        if hasattr(self, "_auto_rois_total_work"):
+                            delattr(self, "_auto_rois_total_work")
+                        if hasattr(self, "_auto_rois_n_samples"):
+                            delattr(self, "_auto_rois_n_samples")
+                    return
+
+                elif event == "cancel_request":
+                    # User requested cancellation
+                    try:
+                        if getattr(self, "_auto_rois_cancel_event", None) is not None:
+                            self._auto_rois_cancel_event.set()
+                    except Exception:
+                        pass
+
+        except queue.Empty:
+            pass
+
+        # Reschedule
+        try:
+            self._auto_rois_job = self.after(50, self._auto_rois_poll)
+        except Exception:
+            pass
 
     def run_tracking(self):
         if not self.video:
@@ -1220,76 +1466,103 @@ class AnyTrackApp(tb.Window):
         messagebox.showinfo("anytrack", f"Saved: {out}")
 
     def _open_bg_debug_window(self):
+        """Open simplified debug window showing average and GMM backgrounds side-by-side."""
         if self._bg_debug_win is not None and self._bg_debug_win.winfo_exists():
             self._bg_debug_win.lift()
             return
 
-        win = tk.Toplevel(self)
-        win.title("anytrack – Background Debug")
-        win.geometry("900x520")
+        try:
+            win = tk.Toplevel(self)
+            win.title("anytrack – Background Build Progress")
+            win.geometry("1400x700")
 
-        self._bg_debug_win = win
-        self._bg_debug_q = queue.Queue(maxsize=200)
+            self._bg_debug_win = win
+            self._bg_debug_q = queue.Queue(maxsize=200)
 
-        top = tb.Frame(win, padding=8)
-        top.pack(fill="both", expand=True)
-        top.columnconfigure(0, weight=1)
-        top.columnconfigure(1, weight=1)
-        top.rowconfigure(3, weight=1)
+            # State for storing background images
+            self._bg_average_image = None
+            self._bg_gmm_image = None
 
-        self._bg_dbg_status = tb.Label(top, text="Waiting for background debug events…")
-        self._bg_dbg_status.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+            # Main container
+            main_frame = tb.Frame(win, padding=12)
+            main_frame.pack(fill="both", expand=True)
 
-        self._bg_dbg_indices = tk.Text(top, height=4, wrap="word")
-        self._bg_dbg_indices.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 8))
-        self._bg_dbg_indices.insert("1.0", "(indices will appear here)\n")
-        self._bg_dbg_indices.configure(state="disabled")
+            # Configure grid weights for side-by-side layout
+            main_frame.rowconfigure(0, weight=0)  # Labels row
+            main_frame.rowconfigure(1, weight=1)  # Images row
+            main_frame.rowconfigure(2, weight=0)  # Progress row
+            main_frame.columnconfigure(0, weight=1)  # Left panel (Average)
+            main_frame.columnconfigure(1, weight=1)  # Right panel (GMM)
 
-        # Slider to pick one of the sampled indices for the current trial
-        slider_row = tb.Frame(top)
-        slider_row.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(0, 8))
-        slider_row.columnconfigure(0, weight=1)
+            # Column labels
+            avg_label = tb.Label(main_frame, text="Average Background", font=("TkDefaultFont", 12, "bold"))
+            avg_label.grid(row=0, column=0, pady=(0, 8))
 
-        self._bg_dbg_slider = tb.Scale(
-            slider_row,
-            from_=0,
-            to=0,
-            orient=tk.HORIZONTAL,
-            command=self._bg_dbg_on_slider,
-        )
-        self._bg_dbg_slider.grid(row=0, column=0, sticky="ew")
-        self._bg_dbg_slider.configure(state="disabled")
+            gmm_label = tb.Label(main_frame, text="GMM Background", font=("TkDefaultFont", 12, "bold"))
+            gmm_label.grid(row=0, column=1, pady=(0, 8))
 
-        self._bg_dbg_slider_label = tb.Label(slider_row, text="Sample: – / –")
-        self._bg_dbg_slider_label.grid(row=0, column=1, sticky="e", padx=(8, 0))
+            # Left panel: Average background viewer
+            avg_frame = tb.Frame(main_frame, relief="solid", borderwidth=1)
+            avg_frame.grid(row=1, column=0, sticky="nsew", padx=(0, 6))
+            avg_frame.rowconfigure(0, weight=1)
+            avg_frame.columnconfigure(0, weight=1)
 
-        lf1 = tb.Labelframe(top, text="Sampled frame", padding=6)
-        lf1.grid(row=3, column=0, sticky="nsew", padx=(0, 6))
-        lf1.rowconfigure(0, weight=1)
-        lf1.columnconfigure(0, weight=1)
-        self._bg_dbg_frame_label = tb.Label(lf1)
-        self._bg_dbg_frame_label.grid(row=0, column=0, sticky="nsew")
+            self._bg_avg_viewer = ZoomableImageViewer(avg_frame, bg="#2a2a2a")
+            self._bg_avg_viewer.canvas.grid(row=0, column=0, sticky="nsew")
 
-        lf2 = tb.Labelframe(top, text="Current model (bg)", padding=6)
-        lf2.grid(row=3, column=1, sticky="nsew", padx=(6, 0))
-        lf2.rowconfigure(0, weight=1)
-        lf2.columnconfigure(0, weight=1)
-        self._bg_dbg_model_label = tb.Label(lf2)
-        self._bg_dbg_model_label.grid(row=0, column=0, sticky="nsew")
+            # Right panel: GMM background viewer
+            gmm_frame = tb.Frame(main_frame, relief="solid", borderwidth=1)
+            gmm_frame.grid(row=1, column=1, sticky="nsew", padx=(6, 0))
+            gmm_frame.rowconfigure(0, weight=1)
+            gmm_frame.columnconfigure(0, weight=1)
 
-        def on_close():
-            try:
-                if self._bg_debug_job is not None:
-                    self.after_cancel(self._bg_debug_job)
-            except Exception:
-                pass
-            self._bg_debug_job = None
+            self._bg_gmm_viewer = ZoomableImageViewer(gmm_frame, bg="#2a2a2a")
+            self._bg_gmm_viewer.canvas.grid(row=0, column=0, sticky="nsew")
+
+            # Progress section (spans both columns)
+            progress_frame = tb.Frame(main_frame)
+            progress_frame.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+            progress_frame.columnconfigure(0, weight=1)
+
+            self._bg_status_label = tb.Label(
+                progress_frame,
+                text="Starting background build...",
+                font=("TkFixedFont", 10)
+            )
+            self._bg_status_label.grid(row=0, column=0, sticky="w", pady=(0, 4))
+
+            self._bg_progress_bar = ttk.Progressbar(
+                progress_frame,
+                orient="horizontal",
+                length=400,
+                mode="determinate"
+            )
+            self._bg_progress_bar.grid(row=1, column=0, sticky="ew")
+            self._bg_progress_bar['value'] = 0
+
+            def on_close():
+                try:
+                    if self._bg_debug_job is not None:
+                        self.after_cancel(self._bg_debug_job)
+                except Exception:
+                    pass
+                self._bg_debug_job = None
+                self._bg_debug_win = None
+                self._bg_debug_q = None
+                self._bg_average_image = None
+                self._bg_gmm_image = None
+                win.destroy()
+
+            win.protocol("WM_DELETE_WINDOW", on_close)
+            win.lift()
+            win.focus_force()
+            self._bg_debug_poll()
+        except Exception as e:
+            print(f"ERROR: Failed to create background debug window: {e}")
+            import traceback
+            traceback.print_exc()
             self._bg_debug_win = None
             self._bg_debug_q = None
-            win.destroy()
-
-        win.protocol("WM_DELETE_WINDOW", on_close)
-        self._bg_debug_poll()
 
     def _bg_debug_enqueue(self, event: str, payload: dict):
         q = self._bg_debug_q
@@ -1306,6 +1579,7 @@ class AnyTrackApp(tb.Window):
             return
 
     def _bg_debug_poll(self):
+        """Poll the background debug event queue and update the side-by-side viewers."""
         win = self._bg_debug_win
         q = self._bg_debug_q
         if win is None or not win.winfo_exists() or q is None:
@@ -1316,92 +1590,75 @@ class AnyTrackApp(tb.Window):
             while True:
                 event, payload = q.get_nowait()
 
-                if event == "trial":
-                    k = payload.get("k")
-                    idxs = payload.get("indices", [])
-                    self._bg_dbg_indices_list = [int(x) for x in idxs]
-                    self._bg_dbg_cache = {}
+                if event == "sampling_progress":
+                    # Sampling frames: update progress
+                    step = payload.get("step", 0)
+                    total = payload.get("total", 1)
+                    pct = (step / total) * 20  # 0-20% range
+                    status_text = f"Sampling frames {step}/{total}  ({pct:.1f}%)"
+                    self._bg_status_label.configure(text=status_text)
+                    self._bg_progress_bar['value'] = pct
 
-                    if self._bg_dbg_indices_list:
-                        self._bg_dbg_slider.configure(from_=0, to=len(self._bg_dbg_indices_list) - 1, state="normal")
-                        self._bg_dbg_slider.set(0)
-                        self._bg_dbg_show_pos(0)
-                    else:
-                        self._bg_dbg_slider.configure(from_=0, to=0, state="disabled")
-                        self._bg_dbg_slider_label.configure(text="Sample: – / –")
-                    txt = f"Trial k={k}: {idxs}\n"
-                    self._bg_dbg_indices.configure(state="normal")
-                    self._bg_dbg_indices.insert("end", txt)
-                    self._bg_dbg_indices.see("end")
-                    self._bg_dbg_indices.configure(state="disabled")
-                    self._bg_dbg_status.configure(text=f"Building background (k={k})…")
+                elif event == "average_complete":
+                    # Average background complete: show in left panel
+                    avg = payload.get("average")
+                    if avg is not None:
+                        self._bg_average_image = avg
+                        # Convert grayscale to BGR for display
+                        import cv2
+                        avg_bgr = cv2.cvtColor(avg, cv2.COLOR_GRAY2BGR)
+                        self._bg_avg_viewer.set_image(avg_bgr)
+                    status_text = "Computing GMM background...  (20%)"
+                    self._bg_status_label.configure(text=status_text)
+                    self._bg_progress_bar['value'] = 20
 
-                elif event == "frame":
-                    method = payload.get("method", "")
-                    step = payload.get("step", "?")
-                    steps = payload.get("steps", "?")
-                    frame_idx = payload.get("frame_idx", "?")
-                    self._bg_dbg_status.configure(text=f"{method}  step {step}/{steps}  frame {frame_idx}")
+                elif event == "gmm_progress":
+                    # GMM fitting: update progress
+                    percent = payload.get("percent", 0.0)  # 0-100
+                    pct = 20 + (percent / 100.0) * 70  # Map to 20-90% range
+                    pixel = payload.get("pixel", 0)
+                    total = payload.get("total", 1)
+                    status_text = f"Fitting GMM models {pixel}/{total}  ({pct:.1f}%)"
+                    self._bg_status_label.configure(text=status_text)
+                    self._bg_progress_bar['value'] = pct
 
-                    fr = payload.get("frame")
-                    bg = payload.get("bg")
+                elif event == "gmm_complete":
+                    # GMM complete: show in right panel
+                    gmm = payload.get("gmm")
+                    if gmm is not None:
+                        self._bg_gmm_image = gmm
+                        # Convert grayscale to BGR for display
+                        import cv2
+                        gmm_bgr = cv2.cvtColor(gmm, cv2.COLOR_GRAY2BGR)
+                        self._bg_gmm_viewer.set_image(gmm_bgr)
+                    status_text = "Detecting arenas...  (90%)"
+                    self._bg_status_label.configure(text=status_text)
+                    self._bg_progress_bar['value'] = 90
 
-                    try:
-                        fi = int(payload.get("frame_idx"))
-                        self._bg_dbg_cache[fi] = {"frame": payload.get("frame"), "bg": payload.get("bg")}
-                    except Exception:
-                        fi = None
-                    
-                    if fi is not None and self._bg_dbg_indices_list:
-                        pos = int(round(float(self._bg_dbg_slider.get())))
-                        if 0 <= pos < len(self._bg_dbg_indices_list) and self._bg_dbg_indices_list[pos] == fi:
-                            self._bg_dbg_show_pos(pos)
+                elif event == "arenas_detected":
+                    # Arenas detected
+                    circles = payload.get("circles", [])
+                    status_text = f"Found {len(circles)} arenas, applying blur...  (95%)"
+                    self._bg_status_label.configure(text=status_text)
+                    self._bg_progress_bar['value'] = 95
 
-                    if fr is not None:
-                        im = Image.fromarray(fr)
-                        if im.mode != "RGB":
-                            im = im.convert("RGB")
-                        self._bg_dbg_frame_img = ImageTk.PhotoImage(im)
-                        self._bg_dbg_frame_label.configure(image=self._bg_dbg_frame_img)
-
-                    if bg is not None:
-                        im2 = Image.fromarray(bg)
-                        if im2.mode != "RGB":
-                            im2 = im2.convert("RGB")
-                        self._bg_dbg_model_img = ImageTk.PhotoImage(im2)
-                        self._bg_dbg_model_label.configure(image=self._bg_dbg_model_img)
+                elif event == "blur_complete":
+                    # Blur complete: update right panel
+                    blurred = payload.get("blurred")
+                    if blurred is not None:
+                        self._bg_gmm_image = blurred
+                        # Convert grayscale to BGR for display
+                        import cv2
+                        blurred_bgr = cv2.cvtColor(blurred, cv2.COLOR_GRAY2BGR)
+                        self._bg_gmm_viewer.set_image(blurred_bgr)
+                    status_text = "Complete!  (100%)"
+                    self._bg_status_label.configure(text=status_text)
+                    self._bg_progress_bar['value'] = 100
 
         except queue.Empty:
             pass
 
         self._bg_debug_job = self.after(50, self._bg_debug_poll)
-    
-    def _bg_dbg_on_slider(self, val):
-        try:
-            pos = int(round(float(val)))
-        except Exception:
-            pos = 0
-        self._bg_dbg_show_pos(pos)
-
-    def _bg_dbg_show_pos(self, pos: int):
-        idxs = self._bg_dbg_indices_list
-        if not idxs:
-            self._bg_dbg_slider_label.configure(text="Sample: – / –")
-            return
-
-        pos = max(0, min(len(idxs) - 1, int(pos)))
-        frame_idx = int(idxs[pos])
-
-        # fixed-field label so it doesn’t jump
-        width = max(3, len(str(len(idxs))))
-        self._bg_dbg_slider_label.configure(
-            text=f"Sample: {pos+1:>{width}d} / {len(idxs):>{width}d}   (frame {frame_idx})"
-        )
-
-        payload = self._bg_dbg_cache.get(frame_idx)
-        if not payload:
-            self._bg_dbg_status.configure(text=f"Waiting for debug data for frame {frame_idx}…")
-            return
 
     def _toggle_tracking_debug(self):
         """Toggle tracking debug window on/off."""
@@ -1507,12 +1764,11 @@ class AnyTrackApp(tb.Window):
 
         # Create debug panels for each ROI with color-coded labelframes
         self._tracking_debug_widgets = {}
-        self._roi_colors = {}  # Store ROI -> color mapping
+        # ROI colors are already assigned in main app, just use them
         all_roi_viewers = []  # Collect all viewers for background crosshair sync
         for i, roi in enumerate(self.video.rois):
-            # Assign color to this ROI
-            roi_color = self.ROI_COLORS[i % len(self.ROI_COLORS)]
-            self._roi_colors[roi.name] = roi_color
+            # Use existing ROI color (already assigned in main app)
+            roi_color = self._roi_colors.get(roi.name, self.ROI_COLORS[i % len(self.ROI_COLORS)])
 
             roi_frame = tb.Labelframe(
                 scrollable_frame,
@@ -1786,10 +2042,11 @@ class AnyTrackApp(tb.Window):
             roi_vis = cv2.cvtColor(roi_gray, cv2.COLOR_GRAY2BGR)
             if candidates:
                 best = candidates[0]
-                cv2.circle(roi_vis, (int(best.x), int(best.y)), 4, (0, 255, 0), -1)
-                cv2.ellipse(roi_vis, (int(best.x), int(best.y)),
-                           (int(best.major/2), int(best.minor/2)),
-                           best.angle_deg, 0, 360, (255, 0, 0), 2)
+                cv2.circle(roi_vis, (int(best.x), int(best.y)), 4, roi_color_bgr, -1)
+                theta = np.radians(best.angle_deg)
+                x_end = int(best.x + best.major/2 * np.cos(theta))
+                y_end = int(best.y + best.major/2 * np.sin(theta))
+                cv2.line(roi_vis, (int(best.x), int(best.y)), (x_end, y_end), roi_color_bgr, 1)
 
             # 2. Diff image (colorized for visibility)
             diff_vis = cv2.applyColorMap(diff, cv2.COLORMAP_HOT)
@@ -1806,6 +2063,15 @@ class AnyTrackApp(tb.Window):
                         ellipse = cv2.fitEllipse(cand.contour)
                         # ellipse is a RotatedRect: ((center_x, center_y), (major_axis, minor_axis), angle)
                         cv2.ellipse(bw_vis, ellipse, roi_color_bgr, 1) # Draw green ellipse on original image
+                        (xc, yc), (d1, d2), angle = ellipse
+
+                        # Calculate major axis endpoint for visualization
+                        # Convert OpenCV angle to radians and adjust for Y-down coordinate system
+                        theta = np.radians(angle - 90) 
+                        length = d2 / 2  # Half of the major axis
+                        x_end = int(xc + length * np.cos(theta))
+                        y_end = int(yc + length * np.sin(theta))
+                        cv2.line(bw_vis, (int(xc), int(yc)), (x_end, y_end), (255, 0, 0), 1)
 
 
                     # Draw fitted ellipse
@@ -1852,7 +2118,53 @@ class AnyTrackApp(tb.Window):
             while True:
                 event, payload = q.get_nowait()
 
-                if event == "started":
+                if event == "preprocessing":
+                    # Handle preprocessing progress
+                    roi = payload.get("roi", "")
+                    index = payload.get("index", 0)
+                    total = payload.get("total", 1)
+                    percent = payload.get("percent", 0.0)
+
+                    try:
+                        if roi == "complete":
+                            status_text = f"Preprocessing complete ({total} ROIs)"
+                        else:
+                            status_text = f"Preprocessing ROI {index + 1}/{total}: {roi}"
+
+                        dialog.update_progress(percent, text=status_text)
+                    except Exception:
+                        pass
+
+                elif event == "tracking":
+                    # Handle parallel tracking progress
+                    status = payload.get("status", "")
+
+                    if status == "starting":
+                        n_rois = payload.get("n_rois", 0)
+                        n_workers = payload.get("n_workers", 1)
+                        try:
+                            dialog.update_progress(0.0, text=f"Starting tracking ({n_rois} ROIs, {n_workers} workers)...")
+                        except Exception:
+                            pass
+
+                    elif status == "progress":
+                        completed = payload.get("completed", 0)
+                        total_rois = payload.get("total", 1)
+                        percent = payload.get("percent", 0.0)
+                        try:
+                            status_text = f"Tracking ROI {completed}/{total_rois}  {percent*100:.1f}%"
+                            dialog.update_progress(percent, text=status_text)
+                        except Exception:
+                            pass
+
+                    elif status == "complete":
+                        n_tracks = payload.get("n_tracks", 0)
+                        try:
+                            dialog.update_progress(1.0, text=f"Tracking complete ({n_tracks} tracks)")
+                        except Exception:
+                            pass
+
+                elif event == "started":
                     # optionally use total_frames from payload
                     total = payload.get("total_frames")
                     if total:
@@ -1932,6 +2244,8 @@ class AnyTrackApp(tb.Window):
                             self._update_table(df)
                         self._populate_tree()
                         self.show_frame(self._current_frame_idx)
+                        # Save session after tracking completes
+                        self._save_session()
                     except Exception as e:
                         messagebox.showerror("anytrack", f"Error applying tracking results:\n{e}")
                     return
@@ -1961,25 +2275,8 @@ class AnyTrackApp(tb.Window):
                     return
 
                 elif event == "frame":
-                    # Only update debug images when we explicitly receive a 'frame' event.
-                    fr = payload.get("frame")
-                    bg = payload.get("bg")
-
-                    if fr is not None:
-                        try:
-                            im = Image.fromarray(fr).convert("RGB")
-                            self._bg_dbg_frame_img = ImageTk.PhotoImage(im)
-                            self._bg_dbg_frame_label.configure(image=self._bg_dbg_frame_img)
-                        except Exception:
-                            pass
-
-                    if bg is not None:
-                        try:
-                            im2 = Image.fromarray(bg).convert("RGB")
-                            self._bg_dbg_model_img = ImageTk.PhotoImage(im2)
-                            self._bg_dbg_model_label.configure(image=self._bg_dbg_model_img)
-                        except Exception:
-                            pass
+                    # Frame event - could be used for future debug visualization
+                    pass
 
         except queue.Empty:
             pass
@@ -1989,6 +2286,177 @@ class AnyTrackApp(tb.Window):
             self._track_job = self.after(50, self._track_poll)
         except Exception:
             pass
+
+    def _get_session_path(self) -> Path:
+        """Get path to session file."""
+        from platformdirs import user_data_dir
+        data_dir = Path(user_data_dir("anytrack"))
+        data_dir.mkdir(parents=True, exist_ok=True)
+        return data_dir / "last_session.json"
+
+    def _save_session(self):
+        """Save current session state to file."""
+        try:
+            import json
+            import pickle
+
+            session_data = {}
+
+            # Save video path
+            if self.video is not None:
+                session_data["video_path"] = str(self.video.video_path)
+                session_data["current_frame"] = self._current_frame_idx
+
+                # Save ROIs
+                if self.video.rois:
+                    session_data["rois"] = [
+                        {
+                            "name": roi.name,
+                            "cx": roi.cx,
+                            "cy": roi.cy,
+                            "r": roi.r,
+                            "n_targets": roi.n_targets,
+                        }
+                        for roi in self.video.rois
+                    ]
+
+            # Save background (to separate pickle file)
+            # Save full BackgroundModel if available, otherwise fall back to _background_gray
+            if self._background_model is not None:
+                bg_path = self._get_session_path().parent / "last_background.pkl"
+                with open(bg_path, "wb") as f:
+                    pickle.dump(self._background_model, f)
+                session_data["background_path"] = str(bg_path)
+            elif self._background_gray is not None:
+                # Backward compatibility: save plain grayscale if no model
+                bg_path = self._get_session_path().parent / "last_background.pkl"
+                with open(bg_path, "wb") as f:
+                    pickle.dump(self._background_gray, f)
+                session_data["background_path"] = str(bg_path)
+
+            # Save tracking session (to separate pickle file)
+            if self.session is not None:
+                session_path = self._get_session_path().parent / "last_tracking.pkl"
+                with open(session_path, "wb") as f:
+                    pickle.dump(self.session, f)
+                session_data["session_path"] = str(session_path)
+
+            # Save UI state
+            session_data["zoom_level"] = self._zoom_level
+            session_data["pan_x"] = self._pan_x
+            session_data["pan_y"] = self._pan_y
+            session_data["preview_mode"] = self.preview_mode
+
+            # Write session file
+            with open(self._get_session_path(), "w") as f:
+                json.dump(session_data, f, indent=2)
+
+            print(f"Session saved to {self._get_session_path()}")
+
+        except Exception as e:
+            print(f"Error saving session: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def _load_session(self):
+        """Load previous session state from file."""
+        try:
+            import json
+            import pickle
+
+            session_path = self._get_session_path()
+            if not session_path.exists():
+                return
+
+            with open(session_path, "r") as f:
+                session_data = json.load(f)
+
+            # Load video
+            video_path_str = session_data.get("video_path")
+            if video_path_str and Path(video_path_str).exists():
+                video_path = Path(video_path_str)
+                csv_path = video_path.with_suffix(".csv")
+
+                if csv_path.exists():
+                    # Load video with timing data
+                    self.video = load_video_asset(video_path, csv_path)
+                    self._background_gray = None
+                    self._set_preview_mode("video")
+                    self._background_building = False
+                    self._assign_roi_colors()
+                    self._open_capture()
+                    self._set_slider_range()
+                    self._reset_zoom_pan()
+
+                    # Load ROIs
+                    rois_data = session_data.get("rois")
+                    if rois_data:
+                        from ..models import CircleROI
+                        self.video.rois = [
+                            CircleROI(**roi_data) for roi_data in rois_data
+                        ]
+
+                    self._populate_tree()
+
+                    # Load current frame
+                    current_frame = session_data.get("current_frame", 0)
+                    if current_frame > 0:
+                        self._current_frame_idx = current_frame
+                else:
+                    print(f"Timing CSV not found: {csv_path}")
+
+            # Load background (only if video was loaded)
+            if self.video is not None:
+                bg_path = session_data.get("background_path")
+                if bg_path and Path(bg_path).exists():
+                    with open(bg_path, "rb") as f:
+                        loaded = pickle.load(f)
+
+                        # Check format: BackgroundModel or plain numpy array
+                        if isinstance(loaded, np.ndarray):
+                            # Old format: plain grayscale image
+                            self._background_gray = loaded
+                            self._background_model = None
+                        else:
+                            # New format: BackgroundModel object
+                            self._background_model = loaded
+                            self._background_gray = loaded.gmm
+
+                # Load tracking session
+                session_path_pkl = session_data.get("session_path")
+                if session_path_pkl and Path(session_path_pkl).exists():
+                    with open(session_path_pkl, "rb") as f:
+                        self.session = pickle.load(f)
+                        if self.session is not None:
+                            self._update_table(self.session.dataframe)
+                            self._populate_tree()
+
+                # Load UI state
+                self._zoom_level = session_data.get("zoom_level", 1.0)
+                self._pan_x = session_data.get("pan_x", 0.0)
+                self._pan_y = session_data.get("pan_y", 0.0)
+                preview_mode = session_data.get("preview_mode", "video")
+
+                # Update preview
+                if preview_mode == "background" and self._background_gray is not None:
+                    self._set_preview_mode("background")
+                    self.show_background()
+                elif self._current_frame_idx > 0:
+                    self.show_frame(self._current_frame_idx)
+                else:
+                    self.show_frame(0)
+
+            print(f"Session loaded from {session_path}")
+
+        except Exception as e:
+            print(f"Error loading session: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def _on_closing(self):
+        """Handle window close event."""
+        self._save_session()
+        self.destroy()
 
 def run(
     fast_mode: bool = False,

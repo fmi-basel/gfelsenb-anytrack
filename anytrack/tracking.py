@@ -18,6 +18,7 @@ class EllipseCandidate:
     x: float
     y: float
     angle_deg: float
+    cv_angle_deg: float
     major: float
     minor: float
     area: float
@@ -107,10 +108,16 @@ def _extract_ellipses(
         major = float(max(MA, ma))
         minor = float(min(MA, ma))
         # Fix angle: OpenCV has y-axis flipped, so geometric angle = -opencv_angle (in degrees)
-        geometric_angle = (-float(angle)) % 360.0
+        geometric_angle = angle - 90
         cand.append(EllipseCandidate(
-            x=float(x), y=float(y), angle_deg=geometric_angle,
-            major=major, minor=minor, area=area, contour=c
+            x=float(x), 
+            y=float(y), 
+            angle_deg=geometric_angle, 
+            cv_angle_deg=angle,
+            major=major, 
+            minor=minor, 
+            area=area, 
+            contour=c
         ))
     # Sort: largest area first (often best)
     cand.sort(key=lambda e: e.area, reverse=True)
@@ -141,16 +148,16 @@ def track_video(
     # 1) background
     bg_model = build_background(
         str(video.video_path),
-        method=cfg.bg_method,
-        k_min=cfg.bg_min_frames,
-        k_max=cfg.bg_max_frames,
-        converge_eps=cfg.bg_converge_eps,
-        fg_thresh=cfg.bg_fg_thresh,
-        inpaint_ghosts=cfg.bg_inpaint_ghosts,
-        ghost_area_min=cfg.bg_ghost_area_min,
-        ghost_area_max=cfg.bg_ghost_area_max,
+        n_samples=cfg.gmm_n_samples,
+        bic_improvement=cfg.gmm_bic_improvement,
+        min_std=cfg.gmm_min_std,
+        reg_covar=cfg.gmm_reg_covar,
+        lowp=cfg.gmm_lowp,
+        arena_detection=cfg.arena_detection_enabled,
+        arena_min_area_frac=cfg.arena_min_area_frac,
+        arena_blur_sigma=cfg.arena_blur_sigma,
     )
-    bg = bg_model.image
+    bg = bg_model.gmm
 
     # 2) Ensure we have ROIs
     if not video.rois:
@@ -281,6 +288,7 @@ def track_video(
                 x=float(x_f),
                 y=float(y_f),
                 angle_deg=float(chosen.angle_deg),
+                cv_angle_deg=float(chosen.cv_angle_deg),
                 major=float(chosen.major),
                 minor=float(chosen.minor),
                 area=float(chosen.area),
