@@ -1,7 +1,12 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# OS
 .DS_Store
-anytrack/.DS_Store
-tests/.DS_Store
-anytrack/.DS_Store
-.DS_Store
+
+# Local / session
 /dev-claude
-anytrack/gui/.DS_Store
+fast_hybrid_tracking_pipeline_plan.md
