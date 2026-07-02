@@ -55,6 +55,10 @@ class AnyTrackConfig:
     morph_open: int = 3
     morph_close: int = 5
     max_centroids_per_roi: int = 1
+    # How many blobs the detector surfaces to the tracker per frame. Must be > 1
+    # so the tracker can disambiguate the fly from static artifacts (debris /
+    # reflections) by proximity; the tracker still emits a single object.
+    detect_max_candidates: int = 5
     expected_fly_area_min: int = 10
     expected_fly_area_max: int = 1500
 

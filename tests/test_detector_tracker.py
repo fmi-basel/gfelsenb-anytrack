@@ -231,6 +231,39 @@ def test_tracker_reacquires_after_jump_away_from_center():
     assert sum(got[-5:]) == 5             # fully re-acquired off-center (was 0 before the fix)
 
 
+def test_extract_ellipses_surfaces_multiple_candidates():
+    """The detector must return more than one blob so the tracker can
+    disambiguate the fly from static artifacts (regression for arena_01)."""
+    cfg = _det_cfg()  # detect_max_candidates defaults to 5
+    bg = np.full((140, 140), 200, np.uint8)
+    gray = bg.copy()
+    cv2.circle(gray, (35, 35), 7, 20, -1)    # blob A
+    cv2.circle(gray, (100, 100), 7, 20, -1)  # blob B
+    cands = extract_ellipses(gray, bg, cfg)
+    assert len(cands) >= 2
+
+
+def test_tracker_ignores_static_artifact_once_locked():
+    """Once locked on the moving fly, the tracker must keep picking it and
+    ignore a larger, static artifact blob 150 px away."""
+    from anytrack.tracker import CentroidTracker
+
+    def cands(*pts):
+        return [EllipseCandidate(x=x, y=y, angle_deg=0.0, cv_angle_deg=0.0,
+                                 major=8.0, minor=4.0, area=a) for (x, y, a) in pts]
+
+    tr = CentroidTracker(center_xy=(50.0, 50.0), max_jump=15.0,
+                         miss_tolerance=15, use_kalman=True)
+    for x in (40.0, 42.0, 44.0):               # lock on the fly (only candidate)
+        tr.step(cands((x, 50.0, 60.0)))
+    # Now a LARGER static artifact appears; the fly keeps moving.
+    got = []
+    for x in (46.0, 48.0, 50.0, 52.0, 54.0, 56.0):
+        chosen, _, _ = tr.step(cands((x, 50.0, 60.0), (200.0, 200.0, 200.0)))
+        got.append((chosen.x, chosen.y) if chosen else None)
+    assert all(g is not None and g[1] == 50.0 and g[0] < 100 for g in got)
+
+
 def test_tracker_fast_recovery_via_growing_gate():
     """A jump beyond max_jump is re-acquired within a few frames via the
     growing acceptance gate, without waiting out miss_tolerance.

@@ -151,9 +151,12 @@ def _candidates_from_mask(bw: np.ndarray, cfg: AnyTrackConfig) -> List[EllipseCa
             area=area,
             contour=c,
         ))
-    # Sort largest-area first, then keep at most max_centroids_per_roi.
+    # Sort largest-area first, then surface up to detect_max_candidates blobs so
+    # the tracker can pick the one nearest its prediction (and ignore static
+    # artifacts). The tracker, not this cap, enforces one object per arena.
     cand.sort(key=lambda e: e.area, reverse=True)
-    return cand[: max(1, cfg.max_centroids_per_roi)]
+    n = max(1, int(getattr(cfg, "detect_max_candidates", cfg.max_centroids_per_roi)))
+    return cand[:n]
 
 
 def extract_ellipses(
