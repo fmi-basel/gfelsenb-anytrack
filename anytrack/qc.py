@@ -595,7 +595,10 @@ def render_overlay(
     if show_progress:
         try:
             from tqdm import tqdm
-            total = max_frames or int(getattr(video, "frame_count", 0) or 0) or None
+            # The bar counts OUTPUT frames (one per written frame). With a stride
+            # only every Nth source frame is written, so scale the total down.
+            fc = int(getattr(video, "frame_count", 0) or 0)
+            total = max_frames or ((fc + stride - 1) // stride if fc else None)
             pbar = tqdm(total=total, desc="  overlay",
                         bar_format="  {desc} |{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]",
                         leave=True)
