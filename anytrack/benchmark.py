@@ -8,6 +8,7 @@ Measures tracking FPS for the legacy and fast paths and writes a TOML report.
 from __future__ import annotations
 
 import argparse
+import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
@@ -246,6 +247,21 @@ def benchmark_stages(video, cfg, n_frames: int = 2000) -> dict:
     return out
 
 
+def _git_commit() -> Optional[str]:
+    """Short HEAD hash (with a ``-dirty`` suffix if the tree has local changes)."""
+    try:
+        r = subprocess.run(
+            ["git", "describe", "--always", "--dirty", "--abbrev=7"],
+            capture_output=True, text=True, timeout=5,
+            cwd=Path(__file__).resolve().parent.parent,
+        )
+        if r.returncode == 0:
+            return r.stdout.strip()
+    except Exception:
+        pass
+    return None
+
+
 def main(argv=None):
     import dataclasses
     p = argparse.ArgumentParser(description="Benchmark anytrack tracking FPS.")
@@ -294,7 +310,7 @@ def main(argv=None):
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     label = "fast" if args.fast else "legacy"
     out = Path(args.report_dir) / f"benchmark_{label}_{ts}.toml"
-    write_benchmark_report(results, out, video, cfg)
+    write_benchmark_report(results, out, video, cfg, git_commit=_git_commit())
     print(f"fps_mean={results['fps_mean']:.2f} +/- {results['fps_std']:.2f}  report={out}")
 
 
