@@ -73,6 +73,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help="Also write QC artifacts (overlay/plots/flags/summary).")
     ap.add_argument("--qc-max-frames", type=int, default=0,
                     help="Cap QC overlay frames (0 = whole video).")
+    ap.add_argument("--qc-overlay-stride", type=int, default=None,
+                    help="Render every Nth frame in the QC overlay (default from config: 5; 1 = every frame).")
     ap.add_argument("--crops", action="store_true",
                     help="Also export centroid-centered crops (A5).")
     args = ap.parse_args(argv)
@@ -84,6 +86,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         cfg.roi_downscale = args.downscale
     if args.workers is not None:
         cfg.n_tracking_workers = args.workers
+    if args.qc_overlay_stride is not None:
+        cfg.qc_overlay_stride = max(1, args.qc_overlay_stride)
 
     if not args.video.exists():
         ap.error(f"video not found: {args.video}")

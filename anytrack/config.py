@@ -101,6 +101,12 @@ class AnyTrackConfig:
     qc_montage_tile: int = 96           # thumbnail size (px) in the QC montage
     qc_overlay_downscale: int = 2       # downscale factor for the overlay video (1 = full res)
     qc_overlay_crf: int = 23            # libx264 CRF for the overlay video (lower = better/bigger)
+    qc_overlay_stride: int = 5          # render every Nth frame in the overlay (1 = every frame)
+    # Hardware H.264 (VideoToolbox) is ~1.8x faster than libx264 only at stride=1;
+    # at the default stride=5 libx264 is faster AND ~12x smaller (adaptive CRF vs
+    # fixed bitrate), so HW defaults OFF. Turn on for full-framerate overlays.
+    qc_overlay_hw: bool = False         # use hardware H.264 encode (VideoToolbox) for the overlay
+    qc_overlay_hw_bitrate: str = "6M"   # target bitrate for the hardware encoder
 
     # Local staging (copy source video off slow/network storage before processing).
     # Default off: benchmarks showed the network wasn't the bottleneck (preprocessing

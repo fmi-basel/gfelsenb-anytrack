@@ -548,6 +548,9 @@ def render_overlay(
     sx = w / src_w
     sy = h / src_h
     crf = int(getattr(cfg, "qc_overlay_crf", 23))
+    stride = max(1, int(getattr(cfg, "qc_overlay_stride", 1)))
+    hw_wanted = bool(getattr(cfg, "qc_overlay_hw", True))
+    hw_bitrate = str(getattr(cfg, "qc_overlay_hw_bitrate", "6M"))
 
     rois = list(getattr(video, "rois", []) or [])
     names = [r.name for r in rois] + [str(n) for n in flagged.get("roi", pd.Series(dtype=str)).unique()]
@@ -602,11 +605,26 @@ def render_overlay(
     written = 0
     try:
         if check_ffmpeg_available():
-            written = _overlay_ffmpeg(video.video_path, out_path, w, h, fps, crf,
-                                      max_frames, annotate, pbar)
-        else:
+            # Prefer hardware H.264 (a single VideoToolbox stream is fast here,
+            # unlike the 4-way contention in preprocessing); fall back to
+            # libx264, then to cv2 mp4v.
+            kinds = []
+            if hw_wanted and _videotoolbox_available():
+                kinds.append("hw")
+            kinds.append("sw")
+            for kind in kinds:
+                try:
+                    written = _overlay_ffmpeg(video.video_path, out_path, w, h, fps, crf,
+                                              max_frames, annotate, pbar,
+                                              stride=stride, encoder=kind, bitrate=hw_bitrate)
+                    if written > 0:
+                        break
+                except Exception:
+                    written = 0
+                    continue
+        if written <= 0:
             written = _overlay_cv2(video.video_path, out_path, w, h, fps,
-                                   max_frames, annotate, pbar)
+                                   max_frames, annotate, pbar, stride=stride)
     finally:
         if pbar is not None:
             pbar.close()
@@ -616,34 +634,57 @@ def render_overlay(
     return out_path, written
 
 
-def _overlay_ffmpeg(video_path, out_path, w, h, fps, crf, max_frames, annotate, pbar) -> int:
-    """Decode (scaled) and H.264-encode the annotated overlay through FFmpeg pipes."""
+_VT_AVAILABLE: Optional[bool] = None
+
+
+def _videotoolbox_available() -> bool:
+    """Whether this FFmpeg build exposes the h264_videotoolbox encoder (cached)."""
+    global _VT_AVAILABLE
+    if _VT_AVAILABLE is None:
+        try:
+            out = subprocess.run([get_ffmpeg_path(), "-hide_banner", "-encoders"],
+                                 capture_output=True, text=True, timeout=15)
+            _VT_AVAILABLE = "h264_videotoolbox" in out.stdout
+        except Exception:
+            _VT_AVAILABLE = False
+    return _VT_AVAILABLE
+
+
+def _overlay_ffmpeg(video_path, out_path, w, h, fps, crf, max_frames, annotate, pbar,
+                    stride: int = 1, encoder: str = "sw", bitrate: str = "6M") -> int:
+    """Decode (scaled, optionally frame-stepped) and H.264-encode the annotated
+    overlay through FFmpeg pipes. ``encoder`` is "hw" (VideoToolbox) or "sw"
+    (libx264). With ``stride>1`` only every Nth source frame is rendered, so the
+    output plays ~stride× faster."""
     ffmpeg = get_ffmpeg_path()
-    dec_cmd = [ffmpeg, "-v", "error", "-i", str(video_path), "-vf", f"scale={w}:{h}"]
+    vf = f"scale={w}:{h}" if stride <= 1 else f"framestep=step={stride},scale={w}:{h}"
+    dec_cmd = [ffmpeg, "-v", "error", "-i", str(video_path), "-vf", vf, "-vsync", "vfr"]
     if max_frames:
         dec_cmd += ["-frames:v", str(int(max_frames))]
     dec_cmd += ["-f", "rawvideo", "-pix_fmt", "bgr24", "-"]
+
+    if encoder == "hw":
+        venc = ["-c:v", "h264_videotoolbox", "-b:v", bitrate]
+    else:
+        venc = ["-c:v", "libx264", "-preset", "ultrafast", "-crf", str(crf)]
     enc_cmd = [ffmpeg, "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "bgr24",
                "-s", f"{w}x{h}", "-r", f"{fps:.6f}", "-i", "-",
-               "-c:v", "libx264", "-preset", "ultrafast", "-crf", str(crf),
-               "-pix_fmt", "yuv420p", str(out_path)]
+               *venc, "-pix_fmt", "yuv420p", str(out_path)]
 
     frame_bytes = w * h * 3
     dec = subprocess.Popen(dec_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     enc = subprocess.Popen(enc_cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
                            stderr=subprocess.DEVNULL)
     written = 0
-    fidx = 0
     try:
         while True:
             buf = dec.stdout.read(frame_bytes)
             if len(buf) < frame_bytes:
                 break
             frame = np.frombuffer(buf, np.uint8).reshape(h, w, 3).copy()
-            annotate(frame, fidx)
+            annotate(frame, written * stride)  # k-th kept frame == source frame k*stride
             enc.stdin.write(frame.tobytes())
             written += 1
-            fidx += 1
             if pbar is not None:
                 pbar.update(1)
             if max_frames and written >= max_frames:
@@ -660,10 +701,12 @@ def _overlay_ffmpeg(video_path, out_path, w, h, fps, crf, max_frames, annotate, 
             pass
         enc.wait()
         dec.wait()
+    if enc.returncode not in (0, None):
+        raise RuntimeError(f"ffmpeg encode failed (returncode {enc.returncode}, encoder={encoder})")
     return written
 
 
-def _overlay_cv2(video_path, out_path, w, h, fps, max_frames, annotate, pbar) -> int:
+def _overlay_cv2(video_path, out_path, w, h, fps, max_frames, annotate, pbar, stride: int = 1) -> int:
     """Fallback: cv2 decode + resize + annotate + mp4v write (no FFmpeg)."""
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
@@ -678,6 +721,9 @@ def _overlay_cv2(video_path, out_path, w, h, fps, max_frames, annotate, pbar) ->
         ok, frame = cap.read()
         if not ok:
             break
+        if stride > 1 and (fidx % stride != 0):
+            fidx += 1
+            continue
         if frame.ndim == 2:
             frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
         if (frame.shape[1], frame.shape[0]) != (w, h):
@@ -809,9 +855,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--no-overlay", action="store_true", help="Skip the overlay video (fast).")
     ap.add_argument("--max-frames", type=int, default=0,
                     help="Cap overlay frames (0 = whole video).")
+    ap.add_argument("--overlay-stride", type=int, default=None,
+                    help="Render every Nth frame in the overlay (default from config: 5; 1 = every frame).")
     args = ap.parse_args(argv)
 
     cfg = load_config()
+    if args.overlay_stride is not None:
+        cfg.qc_overlay_stride = max(1, args.overlay_stride)
     if not args.video.exists():
         ap.error(f"video not found: {args.video}")
     if not args.tracks.exists():
