@@ -8,6 +8,7 @@ Detection and centroid linking are delegated to the shared ``detector`` and
 from __future__ import annotations
 
 import multiprocessing as mp
+import time
 from pathlib import Path
 from typing import List, Dict, Optional, Callable
 import numpy as np
@@ -29,7 +30,8 @@ def track_roi_video(
     timing: pd.DataFrame,
     cfg: AnyTrackConfig,
     roi_background: Optional[np.ndarray] = None,
-) -> FlyTrack:
+    return_timing: bool = False,
+):
     """
     Track a single pre-cropped ROI video.
 
@@ -39,18 +41,22 @@ def track_roi_video(
         timing: Timing DataFrame with frame and t_s columns
         cfg: Tracking configuration
         roi_background: Optional pre-cropped background (avoids per-ROI background building)
+        return_timing: If True, return (FlyTrack, {bg_build_s, track_s, n_frames}) for
+            per-stage benchmarking; otherwise return the FlyTrack (production default).
 
     Returns:
-        FlyTrack with observations in original frame coordinates
+        FlyTrack, or (FlyTrack, timing_dict) when return_timing=True.
     """
     scale = preprocess_result.scale_factor
     x0, y0 = preprocess_result.crop_offset
     roi = preprocess_result.original_roi
 
     # Use pre-cropped background if provided, otherwise build from ROI video
+    bg_build_s = 0.0
     if roi_background is not None:
         bg = roi_background
     else:
+        _t_bg = time.perf_counter()
         bg_model = build_background(
             str(roi_video_path),
             n_samples=cfg.gmm_n_samples,
@@ -63,6 +69,7 @@ def track_roi_video(
             arena_blur_sigma=0.0,  # No blur for ROI videos
         )
         bg = bg_model.gmm
+        bg_build_s = time.perf_counter() - _t_bg
 
     # Pre-allocate morphology kernels
     kernel_open, kernel_close = build_morph_kernels(cfg)
@@ -89,6 +96,8 @@ def track_roi_video(
     frame_indices = timing["frame"].values.astype(np.int32)
     t_s_values = timing["t_s"].values.astype(np.float64)
 
+    n_proc = 0
+    _t_track = time.perf_counter()
     for i in range(len(frame_indices)):
         frame_idx = int(frame_indices[i])
         t_s = float(t_s_values[i])
@@ -96,6 +105,7 @@ def track_roi_video(
         ok, frame = cap.read()
         if not ok:
             break
+        n_proc += 1
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
@@ -125,7 +135,10 @@ def track_roi_video(
         )
         track.observations.append(obs)
 
+    track_s = time.perf_counter() - _t_track
     cap.release()
+    if return_timing:
+        return track, {"bg_build_s": bg_build_s, "track_s": track_s, "n_frames": n_proc}
     return track
 
 

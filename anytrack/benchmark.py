@@ -180,71 +180,86 @@ def write_benchmark_report(
     output_path.write_text("\n".join(lines))
 
 
-def benchmark_stages(video, cfg, n_frames: int = 2000) -> dict:
-    """Per-stage timing for the fast path.
+def write_stage_report(stages: dict, output_path: Path, video, cfg, git_commit: Optional[str] = None):
+    """Write a per-stage benchmark breakdown to TOML (with git_commit metadata)."""
+    lines = ["[metadata]", f'timestamp = "{datetime.now().isoformat()}"']
+    if git_commit:
+        lines.append(f'git_commit = "{git_commit}"')
+    lines += [
+        "",
+        "[video]",
+        f'path = "{video.video_path.name}"',
+        f'resolution = "{video.width}x{video.height}"',
+        f"n_rois = {len(video.rois)}",
+        f"total_frames = {video.frame_count}",
+        "",
+        "[stages]",
+    ]
+    for k, v in stages.items():
+        lines.append(f'{k} = "{v}"' if isinstance(v, str) else f"{k} = {v}")
+    lines.append("")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("\n".join(lines))
 
-    Separates the costs the aggregate FPS conflates: FFmpeg ROI preprocessing
-    (reads the whole source), per-ROI background build, and pure per-ROI
-    tracking throughput. Requires ``video.rois`` to be set.
+
+def benchmark_stages(video, cfg, n_frames: int = 2000) -> dict:
+    """Per-stage timing for the fast path, measured from the real pipeline.
+
+    Separates the costs the aggregate FPS conflates — FFmpeg preprocessing
+    (decode-once), per-ROI background build, and the pure tracking loop — using
+    the actual ``track_roi_video`` (via return_timing) rather than a
+    re-implementation. Reports the tracking-alone throughput (frames/s for one
+    animal) plus parallel full-video estimates. Requires ``video.rois``.
     """
     import time
-    import cv2
     from .preprocess import extract_roi_videos, cleanup_roi_videos
-    from .background import build_background
-    from .detector import extract_ellipses, build_morph_kernels
-    from .tracker import CentroidTracker
+    from .tracking_fast import track_roi_video
 
     if not video.rois:
         raise ValueError("benchmark_stages needs ROIs; call ensure_rois first")
 
-    out = {"n_rois": len(video.rois), "n_frames_target": n_frames}
+    timing = video.timing
+    if timing is not None and len(timing) > n_frames:
+        timing = timing.head(n_frames).copy()
+    n = len(timing) if timing is not None else 0
 
     t0 = time.perf_counter()
     pr = extract_roi_videos(
         video.video_path, video.rois,
         downscale=cfg.roi_downscale, use_hw_encode=cfg.use_hw_encode,
     )
-    out["preprocess_s"] = round(time.perf_counter() - t0, 2)
+    preprocess_s = time.perf_counter() - t0
 
+    bg_builds, track_ss, frames = [], [], []
     try:
-        first = next(iter(pr.values()))
-
-        t0 = time.perf_counter()
-        bg = build_background(
-            str(first.video_path),
-            n_samples=cfg.gmm_n_samples, bic_improvement=cfg.gmm_bic_improvement,
-            min_std=cfg.gmm_min_std, reg_covar=cfg.gmm_reg_covar, lowp=cfg.gmm_lowp,
-            arena_detection=False, arena_blur_sigma=0.0,
-        ).gmm
-        out["bg_build_one_roi_s"] = round(time.perf_counter() - t0, 2)
-
-        kopen, kclose = build_morph_kernels(cfg)
-        scale = first.scale_factor
-        tracker = CentroidTracker(
-            center_xy=(first.original_roi.r / scale, first.original_roi.r / scale),
-            max_jump=cfg.max_jump_px / scale, miss_tolerance=cfg.miss_tolerance,
-            use_kalman=cfg.use_kalman,
-        )
-        cap = cv2.VideoCapture(str(first.video_path))
-        n = 0
-        t0 = time.perf_counter()
-        while n < n_frames:
-            ok, frame = cap.read()
-            if not ok:
-                break
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            cands = extract_ellipses(gray, bg, cfg, kernel_open=kopen, kernel_close=kclose)
-            tracker.step(cands)
-            n += 1
-        dt = time.perf_counter() - t0
-        cap.release()
-        out["track_frames"] = n
-        out["track_s"] = round(dt, 2)
-        out["track_one_roi_fps"] = round(n / dt, 1) if dt > 0 else 0.0
+        for p in pr.values():
+            _, tm = track_roi_video(p.video_path, p, timing, cfg, return_timing=True)
+            bg_builds.append(tm["bg_build_s"])
+            track_ss.append(tm["track_s"])
+            frames.append(tm["n_frames"])
     finally:
         cleanup_roi_videos(pr)
 
-    return out
+    tot_frames = sum(frames)
+    max_track = max(track_ss) if track_ss else 0.0
+    # Production runs the ROIs in parallel workers, so the tracking-phase wall
+    # time is the slowest worker's (background build + tracking loop).
+    parallel_wall = max((b + t for b, t in zip(bg_builds, track_ss)), default=0.0)
+    per_roi_fps = mean([f / t for f, t in zip(frames, track_ss) if t > 0]) if track_ss else 0.0
+
+    return {
+        "n_rois": len(pr),
+        "n_frames": n,
+        "preprocess_s": round(preprocess_s, 2),
+        "bg_build_s_mean": round(mean(bg_builds), 2) if bg_builds else 0.0,
+        "bg_build_s_max": round(max(bg_builds), 2) if bg_builds else 0.0,
+        "track_s_mean": round(mean(track_ss), 2) if track_ss else 0.0,
+        "track_s_max": round(max_track, 2),
+        "tracking_fps_per_roi": round(per_roi_fps, 1),                                    # tracking ALONE (one animal)
+        "tracking_crops_per_s": round(tot_frames / max_track, 1) if max_track else 0.0,   # all ROIs, parallel
+        "video_fps_excl_preprocess": round(n / parallel_wall, 1) if parallel_wall else 0.0,
+        "video_fps_incl_preprocess": round(n / (preprocess_s + parallel_wall), 1) if (preprocess_s + parallel_wall) else 0.0,
+    }
 
 
 def _git_commit() -> Optional[str]:
@@ -301,6 +316,10 @@ def main(argv=None):
         print("PER-STAGE (fast path):")
         for k, v in st.items():
             print(f"  {k}: {v}")
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        out = Path(args.report_dir) / f"benchmark_stages_{ts}.toml"
+        write_stage_report(st, out, video, cfg, git_commit=_git_commit())
+        print(f"report={out}")
         return
 
     results = benchmark_tracking(
