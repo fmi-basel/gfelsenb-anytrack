@@ -18,6 +18,7 @@ from .io import load_video_asset
 from .session import TrackingSession
 from .writer import write_tracks, default_output_path
 from .benchmark import ensure_rois
+from .cli_progress import TqdmProgress, header, step, ok, info
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -68,52 +69,47 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     video = load_video_asset(args.video, Path(timing))
 
-    print(f"detecting ROIs on {args.video.name} ...")
+    header(f"anytrack · {args.video.name}")
+    info(f"mode: {'fast' if cfg.fast_mode else 'legacy'}   frames: {video.frame_count}   timing: {Path(timing).name}")
+
+    step("Detect ROIs (background + arena detection) …")
     ensure_rois(video, cfg)
     if not video.rois:
-        print("No ROIs detected; nothing to track.")
+        info("No ROIs detected; nothing to track.")
         return 1
-    print(f"{len(video.rois)} ROI(s); fast_mode={cfg.fast_mode}")
+    ok(f"{len(video.rois)} ROI(s): {', '.join(r.name for r in video.rois)}")
 
-    # Coarse progress: print each phase and 10% buckets, never per-frame spam.
-    state = {"bucket": -1}
-
-    def progress(event: str, payload: dict) -> None:
-        if event == "done":
-            return
-        pct = payload.get("percent")
-        if pct is None:
-            label = payload.get("roi", "")
-            print(f"  [{event}] {label}".rstrip())
-            return
-        bucket = int(pct * 10)
-        if bucket != state["bucket"]:
-            state["bucket"] = bucket
-            print(f"  [{event}] {pct * 100:4.0f}%  {payload.get('roi', '')}".rstrip())
-
+    progress = TqdmProgress()
     t0 = time.perf_counter()
     session = TrackingSession(cfg=cfg, video=video)
     df = session.run(progress_hook=progress)
+    progress.close()
     dt = time.perf_counter() - t0
 
     out = Path(args.output) if args.output else default_output_path(cfg, video, kind="tracks")
     fmt = "csv" if out.suffix.lower() == ".csv" else None
     write_tracks(df, out, fmt=fmt)
-    fps = (len(df) / dt) if dt > 0 else 0.0
-    print(f"tracked {len(df)} rows in {dt:.1f}s ({fps:.0f} rows/s) -> {out}")
+    rows_s = (len(df) / dt) if dt > 0 else 0.0
+    ok(f"tracked {len(df)} rows in {dt:.1f}s ({rows_s:.0f} rows/s)")
+    info(f"→ {out}")
 
     if args.qc:
         from .qc import run_qc
+        step("QC (overlay + plots + flags + summary) …")
         qc_dir = out.parent / f"{out.stem}_qc"
-        run_qc(video, df, cfg, qc_dir, overlay=True, max_frames=args.qc_max_frames)
-        print(f"QC artifacts -> {qc_dir}")
+        res = run_qc(video, df, cfg, qc_dir, overlay=True,
+                     max_frames=args.qc_max_frames, show_progress=True)
+        ok(f"QC → {qc_dir}" + (f" (overlay {res['overlay_frames']} frames)"
+                               if res.get("overlay_path") else " (overlay skipped)"))
 
     if args.crops:
         from .cropper import export_crops
+        step("Export centroid crops …")
         crops_dir = out.parent / f"{out.stem}_crops"
-        manifest = export_crops(video, df, cfg, out_dir=crops_dir)
-        print(f"exported {len(manifest)} crops -> {crops_dir}")
+        manifest = export_crops(video, df, cfg, out_dir=crops_dir, show_progress=True)
+        ok(f"exported {len(manifest)} crops → {crops_dir}")
 
+    header("done")
     return 0
 
 

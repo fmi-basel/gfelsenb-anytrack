@@ -110,6 +110,7 @@ def export_crops(
     frame_col: str = "frame",
     x_col: str = "x",
     y_col: str = "y",
+    show_progress: bool = False,
 ) -> pd.DataFrame:
     """Export centroid-centered crops from the original full-res video.
 
@@ -141,6 +142,17 @@ def export_crops(
     records: List[Dict[str, Any]] = []
     fidx = 0
     max_needed = max(needed) if needed else -1
+
+    pbar = None
+    if show_progress:
+        try:
+            from tqdm import tqdm
+            pbar = tqdm(total=(max_needed + 1) if max_needed >= 0 else None, desc="  crops",
+                        bar_format="  {desc} |{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]",
+                        leave=True)
+        except Exception:
+            pbar = None
+
     while True:
         ok, frame = cap.read()
         if not ok:
@@ -168,8 +180,12 @@ def export_crops(
                     "out_of_bounds": oob,
                 })
         fidx += 1
+        if pbar is not None:
+            pbar.update(1)
         if fidx > max_needed:
             break
+    if pbar is not None:
+        pbar.close()
     cap.release()
 
     manifest = pd.DataFrame.from_records(records)
@@ -222,7 +238,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     # .video_path is sufficient — no timing CSV required for crop export.
     video = SimpleNamespace(video_path=args.video)
 
-    manifest = export_crops(video, df, cfg, out_dir=args.out_dir, every_n=args.every_n)
+    manifest = export_crops(video, df, cfg, out_dir=args.out_dir, every_n=args.every_n,
+                            show_progress=True)
     out_dir = args.out_dir or Path(getattr(cfg, "crop_export_dir", "") or "crops")
     print(f"exported {len(manifest)} crops -> {out_dir}")
     print(f"manifest: {out_dir / 'manifest.parquet'}")

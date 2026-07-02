@@ -109,7 +109,6 @@ def config_path() -> Path:
 
 def load_config() -> AnyTrackConfig:
     path = config_path()
-    print(path)
     if not path.exists():
         cfg = AnyTrackConfig()
         save_config(cfg)

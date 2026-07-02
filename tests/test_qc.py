@@ -122,7 +122,8 @@ def test_run_qc_writes_artifacts(tmp_path):
     cfg = AnyTrackConfig(crop_size=16)
     out_dir = tmp_path / "qc"
 
-    res = run_qc(video, _tracks_df(10), cfg, out_dir, overlay=True, max_frames=5)
+    res = run_qc(video, _tracks_df(10), cfg, out_dir, overlay=True, max_frames=5,
+                 show_progress=True)
 
     assert (out_dir / "qc_summary.json").exists()
     assert (out_dir / "qc_flags.parquet").exists()

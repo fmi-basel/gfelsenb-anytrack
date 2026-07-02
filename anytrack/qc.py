@@ -207,6 +207,7 @@ def render_overlay(
     out_path: Path,
     max_frames: int = 0,
     trail_len: int = 30,
+    show_progress: bool = False,
 ) -> Tuple[Optional[Path], int]:
     """Burn tracking annotations onto the source video.
 
@@ -238,6 +239,17 @@ def render_overlay(
         return None, 0
 
     rois = list(getattr(video, "rois", []) or [])
+    pbar = None
+    if show_progress:
+        try:
+            from tqdm import tqdm
+            total = max_frames or int(getattr(video, "frame_count", 0) or 0) or None
+            pbar = tqdm(total=total, desc="  overlay",
+                        bar_format="  {desc} |{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]",
+                        leave=True)
+        except Exception:
+            pbar = None
+
     fidx = 0
     written = 0
     while True:
@@ -269,9 +281,13 @@ def render_overlay(
         writer.write(frame)
         written += 1
         fidx += 1
+        if pbar is not None:
+            pbar.update(1)
         if max_frames and written >= max_frames:
             break
 
+    if pbar is not None:
+        pbar.close()
     cap.release()
     writer.release()
     return out_path, written
@@ -284,6 +300,7 @@ def run_qc(
     out_dir: Path,
     overlay: bool = True,
     max_frames: int = 0,
+    show_progress: bool = False,
 ) -> Dict[str, Any]:
     """Produce all QC artifacts into ``out_dir`` and return a manifest dict."""
     out_dir = Path(out_dir)
@@ -303,7 +320,8 @@ def run_qc(
     n_overlay = 0
     if overlay:
         overlay_path, n_overlay = render_overlay(
-            video, df, cfg, out_dir / "qc_overlay.mp4", max_frames=max_frames
+            video, df, cfg, out_dir / "qc_overlay.mp4",
+            max_frames=max_frames, show_progress=show_progress,
         )
 
     return {
@@ -360,7 +378,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                             fps_nominal=fps, rois=[])
 
     out_dir = args.out_dir or (Path(getattr(cfg, "output_dir", "") or ".") / "qc")
-    res = run_qc(video, df, cfg, out_dir, overlay=not args.no_overlay, max_frames=args.max_frames)
+    res = run_qc(video, df, cfg, out_dir, overlay=not args.no_overlay,
+                 max_frames=args.max_frames, show_progress=True)
 
     print(f"QC written to {out_dir}")
     print(f"  summary: {res['summary_path']}")
