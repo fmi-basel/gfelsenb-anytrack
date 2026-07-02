@@ -1,0 +1,31 @@
+[metadata]
+timestamp = "2026-07-02T14:54:28.600357"
+
+[video]
+path = "localsearch_2025-12-11T09_34_21.avi"
+resolution = "2176x2176"
+n_rois = 4
+total_frames = 18005
+
+[benchmark]
+n_frames = 2000
+n_runs = 3
+
+[results]
+fps_per_run = [15.84, 15.80, 15.77]
+fps_mean = 15.81
+fps_std = 0.04
+ms_per_frame_mean = 63.26
+total_time_s = 379.59
+
+[config]
+gmm_n_samples = 100
+bgdiff_type = "dark"
+thr_method = "otsu"
+thr_fixed = 35
+morph_open = 3
+morph_close = 5
+use_kalman = true
+max_jump_px = 40.0
+fast_mode = true
+roi_downscale = 2
