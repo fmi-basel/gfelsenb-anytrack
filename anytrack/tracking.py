@@ -19,18 +19,9 @@ from .config import AnyTrackConfig
 from .detector import (
     EllipseCandidate,
     build_morph_kernels,
-    threshold_fg,
     extract_ellipses,
 )
-from .tracker import Kalman2D, CentroidTracker, greedy_assign
-
-# Backwards-compatible private aliases. External importers (notably the GUI
-# tracking-debug window) still import these names from this module; they are
-# repointed to detector.debug_frame in a later refactor step.
-_build_morph_kernels = build_morph_kernels
-_threshold_fg = threshold_fg
-_extract_ellipses = extract_ellipses
-_greedy_assign = greedy_assign
+from .tracker import CentroidTracker
 
 
 def track_video(

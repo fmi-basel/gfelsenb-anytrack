@@ -175,3 +175,59 @@ def export_crops(
     manifest = pd.DataFrame.from_records(records)
     manifest.to_parquet(out_dir / "manifest.parquet", index=False)
     return manifest
+
+
+def _load_tracks(path: Path) -> pd.DataFrame:
+    """Read a finished session's tracks table (parquet or CSV)."""
+    if path.suffix.lower() == ".csv":
+        return pd.read_csv(path)
+    return pd.read_parquet(path)
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    """CLI: export centroid-centered crops from a finished session (A5/A7).
+
+    Runs a second full-resolution pass over the original video using an
+    existing tracks table, writing ``{roi}/{frame:06d}.png`` + a manifest for
+    SLEAP labeling. Independent of pose deps.
+    """
+    import argparse
+    from types import SimpleNamespace
+    from .config import load_config
+
+    ap = argparse.ArgumentParser(
+        prog="anytrack-crop-export",
+        description="Export centroid-centered crops from a finished tracking session.",
+    )
+    ap.add_argument("--video", required=True, type=Path, help="Original full-resolution video.")
+    ap.add_argument("--tracks", required=True, type=Path,
+                    help="Tracks table from the session (.parquet or .csv) with roi/frame/x/y columns.")
+    ap.add_argument("--out-dir", type=Path, default=None,
+                    help="Output directory (default: cfg.crop_export_dir or ./crops).")
+    ap.add_argument("--every-n", type=int, default=1, help="Export every Nth frame (default 1).")
+    ap.add_argument("--crop-size", type=int, default=None, help="Override crop_size (px).")
+    args = ap.parse_args(argv)
+
+    cfg = load_config()
+    if args.crop_size is not None:
+        cfg.crop_size = args.crop_size
+
+    if not args.video.exists():
+        ap.error(f"video not found: {args.video}")
+    if not args.tracks.exists():
+        ap.error(f"tracks not found: {args.tracks}")
+
+    df = _load_tracks(args.tracks)
+    # export_crops only needs the pixel source, so a minimal video object with
+    # .video_path is sufficient — no timing CSV required for crop export.
+    video = SimpleNamespace(video_path=args.video)
+
+    manifest = export_crops(video, df, cfg, out_dir=args.out_dir, every_n=args.every_n)
+    out_dir = args.out_dir or Path(getattr(cfg, "crop_export_dir", "") or "crops")
+    print(f"exported {len(manifest)} crops -> {out_dir}")
+    print(f"manifest: {out_dir / 'manifest.parquet'}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -215,8 +215,8 @@ const MODULES = [
   {mod:"background.py",    resp:"Static per-pixel GMM — vectorized numpy EM (~12×, validated vs sklearn); per-frame drift/protection pending (A4).", status:"partial"},
   {mod:"tracking.py / tracking_fast.py", resp:"Now thin callers of detector/tracker; legacy cv_angle_deg bug fixed.", status:"done"},
   {mod:"preprocess.py",    resp:"FFmpeg ROI extraction — single-pass (decode once, split→4 crops, libx264) + sequential-HW fallback.", status:"done"},
-  {mod:"session.py",       resp:"Orchestration; pose stage + x_roi columns wiring pending (A7).", status:"partial"},
-  {mod:"gui/app.py",       resp:"Debug window repoint to detector.debug_frame + crop-export action pending (A7).", status:"partial"},
+  {mod:"session.py",       resp:"Orchestration; x_roi/y_roi columns wired into output (A7). Pose stage pending (B).", status:"partial"},
+  {mod:"gui/app.py",       resp:"Debug window now renders from detector.debug_frame (A7). Pose overlay (B); optional in-GUI crop-export menu deferred (CLI exists).", status:"partial"},
   {mod:"sleap_inference.py", resp:"Pose engine — not yet created (B).", status:"planned"},
   {mod:"qc.py",            resp:"QC overlays / plots — not yet created (A9).", status:"planned"},
 ];
@@ -224,11 +224,11 @@ const MODULES = [
 const MILESTONE_A = [
   {code:"A1", t:"detector.py + fix legacy bug", status:"done", n:"Shared detection; cv_angle_deg/contour bug fixed. Regression-tested."},
   {code:"A2", t:"tracker.py (linking)", status:"done", n:"Kalman + greedy + CentroidTracker; behavior-preserving."},
-  {code:"A3", t:"coordinates.py", status:"done", n:"Conversions + round-trip tests; fast path routes through it. x_roi column wiring → A7."},
+  {code:"A3", t:"coordinates.py", status:"done", n:"Conversions + round-trip tests; fast path routes through it. x_roi/y_roi columns now wired into session output (A7)."},
   {code:"A4", t:"background drift + protection", status:"planned", n:"Opt-in (off by default). Config fields already added; hot-loop wiring pending."},
   {code:"A5", t:"cropper.py", status:"done", n:"Crop extraction + export + batcher, edge/OOB tested."},
   {code:"A6", t:"writer.py", status:"done", n:"Parquet/CSV + streaming, schema round-trip tested."},
-  {code:"A7", t:"config + session + GUI wiring", status:"partial", n:"Config fields done; GUI debug repoint + crop-export + session pose stage pending."},
+  {code:"A7", t:"config + session + GUI wiring", status:"done", n:"Config fields done; GUI debug window repointed to detector.debug_frame; x_roi/y_roi wired into session output; tracking.py compat shims removed; crop-export CLI added (anytrack-crop-export). Optional in-GUI crop-export menu + session pose stage → B."},
   {code:"A8", t:"repair tests + benchmark.py", status:"done", n:"Stale API fixed; benchmark promoted + CLI; testpaths pinned."},
   {code:"A9", t:"qc.py", status:"planned", n:"Overlays, distributions, failure flags."},
 ];
@@ -249,7 +249,7 @@ const NOTES = [
   "SLEAP pose crops are taken from a full-resolution second pass over the original video (never the downscaled tracking sub-videos).",
   "Legacy background build measured ≈110 s on a 2176² video (per-pixel GMM loop) — the accuracy test uses this path; fast mode avoids it via downscaled per-ROI builds.",
   "Measured (2176², 4 ROIs): tracker ~900 fps/ROI (not the bottleneck); OpenCV single-thread decode of full frames caps at ~137 fps — why an in-process 'decode in Python' path (2b) was rejected. FFmpeg decodes ~9× faster (multi-threaded).",
-  "Fast-mode preprocessing now decodes the source ONCE: single-pass FFmpeg (split → 4 crops → libx264) replaced 4 sequential full-video decodes → ~58 s → ~29 s on the test clip (~2×). End-to-end full-video fast mode measured ~216 fps (up from ~160). 4 concurrent VideoToolbox HW encoders run at ~1 fps, so single-pass uses software; sequential-HW is the fallback. NOTE: on real ROIs an odd downscaled dimension (e.g. r=475 -> 475 px) made libx264 fail and single-pass silently fell back to sequential (~57 s) until the crop was rounded to even dims (commit 2cd9a83) — re-benchmark to confirm the ~29 s figure holds on real data. Local staging stays opt-in/off (network wasn't the bottleneck).",
+  "Fast-mode preprocessing decodes the source ONCE: single-pass FFmpeg (split → 4 crops → libx264) replaced 4 sequential full-video decodes. CONFIRMED on real data (2176², 4 ROIs, 18003 frames), same clip two runs: preprocess 57.2 s (commit bf0c56e, single-pass silently falling back to sequential-HW) → 32.3 s (commit dad1f24) once the odd-downscaled-dimension bug was fixed (crop rounded to a multiple of 2×downscale so libx264 accepts even dims — commit 2cd9a83). Tracking-alone unchanged at ~889 fps/ROI, so end-to-end full-video fast mode rose 222.8 → 325.4 fps. 4 concurrent VideoToolbox HW encoders run at ~1 fps, so single-pass uses software; sequential-HW is the fallback. Local staging stays opt-in/off (network wasn't the bottleneck).",
   "Per-pixel GMM background is now vectorized (numpy EM, validated vs sklearn): legacy full-frame build ~110 s → ~8.7 s (~13×), and end-to-end fast mode 216 → 246 fps. It also cuts the accuracy test's two full-frame builds from ~220 s to ~18 s. 500 fps remains out of reach on this codec/machine (one full FFmpeg decode alone is ~15–19 s).",
 ];
 

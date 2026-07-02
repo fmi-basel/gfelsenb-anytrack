@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 
 from anytrack.config import AnyTrackConfig
-from anytrack.cropper import extract_crop, CropBatcher, export_crops
+from anytrack.cropper import extract_crop, CropBatcher, export_crops, main as crop_export_main
 from anytrack.models import VideoAsset, CircleROI
 
 
@@ -115,3 +115,36 @@ def test_export_crops_writes_pngs_and_manifest(tmp_path):
         # object centered -> x_crop/y_crop near size/2
         assert abs(row["x_crop"] - 16) <= 1
         assert not row["out_of_bounds"]
+
+
+def test_crop_export_cli(tmp_path):
+    """The anytrack-crop-export CLI runs A5 over a saved tracks table."""
+    video_path = tmp_path / "vid.avi"
+    if not _write_video(video_path):
+        pytest.skip("No MJPG encoder available")
+
+    n = 6
+    df = pd.DataFrame({
+        "roi": ["r0"] * n,
+        "frame": np.arange(n),
+        "x": [32.0] * n,
+        "y": [32.0] * n,
+    })
+    tracks = tmp_path / "tracks.parquet"
+    df.to_parquet(tracks, index=False)
+    out_dir = tmp_path / "cli_crops"
+
+    rc = crop_export_main([
+        "--video", str(video_path),
+        "--tracks", str(tracks),
+        "--out-dir", str(out_dir),
+        "--crop-size", "32",
+    ])
+    assert rc == 0
+
+    manifest_path = out_dir / "manifest.parquet"
+    assert manifest_path.exists()
+    manifest = pd.read_parquet(manifest_path)
+    assert len(manifest) == n
+    for rel in manifest["path"]:
+        assert (out_dir / rel).exists()

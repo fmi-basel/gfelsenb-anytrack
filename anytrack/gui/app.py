@@ -22,7 +22,7 @@ from ..background import build_background, BackgroundModel
 from ..roi import detect_circular_rois, roi_mask
 from ..session import TrackingSession
 from ..models import VideoAsset, TrackingResult
-from ..tracking import _extract_ellipses, _build_morph_kernels, _threshold_fg
+from ..detector import debug_frame
 from .progress import TrackingProgressDialog, make_progress_hook, ETAEstimator
 
 
@@ -1989,7 +1989,6 @@ class AnyTrackApp(tb.Window):
                     pass
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        kernel_open, kernel_close = _build_morph_kernels(self.cfg)
 
         for roi in self.video.rois:
             if roi.name not in self._tracking_debug_widgets:
@@ -2010,26 +2009,13 @@ class AnyTrackApp(tb.Window):
             roi_shape = (y1 - y0, x1 - x0)
             mask = roi_mask(roi_shape, roi, (x0, y0))
 
-            # Background subtraction - use same logic as tracking
-            bgdiff_type = getattr(self.cfg, 'bgdiff_type', 'dark')
-            if bgdiff_type == "dark":
-                # Only pixels darker than background
-                diff = cv2.subtract(bg_roi, roi_gray)
-            elif bgdiff_type == "bright":
-                # Only pixels brighter than background
-                diff = cv2.subtract(roi_gray, bg_roi)
-            else:  # "absolute"
-                # Absolute difference
-                diff = cv2.absdiff(roi_gray, bg_roi)
-
-            if mask is not None:
-                diff = cv2.bitwise_and(diff, diff, mask=mask)
-
-            # Binary mask
-            bw = _threshold_fg(diff, self.cfg, kernel_open, kernel_close)
-
-            # Extract ellipse candidates (this also uses bgdiff_type internally)
-            candidates = _extract_ellipses(roi_gray, bg_roi, self.cfg, mask, kernel_open, kernel_close)
+            # Render from the SAME detection path the tracker uses, so this
+            # window can never drift from the real pipeline (diff, binary mask,
+            # and candidates all come from detector.debug_frame).
+            dbg = debug_frame(roi_gray, bg_roi, self.cfg, mask)
+            diff = dbg.diff
+            bw = dbg.mask
+            candidates = dbg.candidates
 
             # Get ROI color for drawing
             roi_color_hex = self._roi_colors.get(roi.name, "#FFFFFF")

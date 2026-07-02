@@ -10,6 +10,7 @@ from .tracking import track_video
 from .tracking_fast import track_video_fast
 from .trajectory import interpolate_missing, enforce_single_per_frame
 from .kinematics import add_kinematics
+from .coordinates import add_roi_local_columns
 
 @dataclass
 class TrackingSession:
@@ -81,6 +82,10 @@ class TrackingSession:
         roi_centers = {r.name: (r.cx, r.cy) for r in self.video.rois}
         px_per_mm = {r.name: (2.0 * r.r) / float(self.cfg.arena_diameter_mm) for r in self.video.rois}
         df = add_kinematics(df, roi_centers=roi_centers, px_per_mm_by_roi=px_per_mm)
+
+        # Additive ROI-local coordinates (x_roi, y_roi). Full-frame x/y stay
+        # canonical so kinematics and the GUI are unaffected.
+        df = add_roi_local_columns(df, self.video.rois)
 
         self.dataframe = df
 
