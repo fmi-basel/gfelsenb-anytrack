@@ -216,6 +216,7 @@ const MODULES = [
   {mod:"tracking.py / tracking_fast.py", resp:"Now thin callers of detector/tracker; legacy cv_angle_deg bug fixed.", status:"done"},
   {mod:"preprocess.py",    resp:"FFmpeg ROI extraction — single-pass (decode once, split→4 crops, libx264) + sequential-HW fallback.", status:"done"},
   {mod:"session.py",       resp:"Orchestration; x_roi/y_roi columns wired into output (A7). Pose stage pending (B).", status:"partial"},
+  {mod:"run.py",           resp:"Headless full-pipeline CLI: anytrack-run (ROI detect → track → write to --output; --qc/--crops chaining) (NEW).", status:"done"},
   {mod:"gui/app.py",       resp:"Debug window now renders from detector.debug_frame (A7). Pose overlay (B); optional in-GUI crop-export menu deferred (CLI exists).", status:"partial"},
   {mod:"sleap_inference.py", resp:"Pose engine — not yet created (B).", status:"planned"},
   {mod:"qc.py",            resp:"Overlay video + diagnostics figure + failure flags/summary + anytrack-qc CLI (NEW).", status:"done"},
