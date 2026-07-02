@@ -84,6 +84,13 @@ class CentroidTracker:
         self.use_kalman = use_kalman
         self.kf: Optional[Kalman2D] = None
         self.misses = 0
+        self.last: Tuple[float, float] = center_xy  # last confirmed position
+
+    def _seed(self, x: float, y: float):
+        """(Re-)initialize the filter at a known position and clear the miss streak."""
+        self.kf = Kalman2D(x, y)
+        self.last = (x, y)
+        self.misses = 0
 
     def step(
         self, candidates: List[EllipseCandidate]
@@ -96,38 +103,45 @@ class CentroidTracker:
         """
         # Lazy init on first frame: seed at the best candidate, else the center.
         if self.kf is None:
-            if candidates:
-                self.kf = Kalman2D(candidates[0].x, candidates[0].y)
-            else:
-                self.kf = Kalman2D(self.cx, self.cy)
+            seed = max(candidates, key=lambda c: c.area) if candidates else None
+            self._seed(seed.x, seed.y) if seed else self._seed(self.cx, self.cy)
 
-        px, py = self.kf.predict() if self.use_kalman else (self.cx, self.cy)
-        chosen = greedy_assign((px, py), candidates, self.max_jump)
+        if self.use_kalman and self.misses == 0:
+            px, py = self.kf.predict()
+        else:
+            # While lost (or without Kalman), anchor the search at the last
+            # confirmed position, NOT the constant-velocity extrapolation, which
+            # drifts away during a miss streak and keeps gating the fly out.
+            px, py = self.last
+
+        # Widen the acceptance gate the longer we've been lost, so a fast jump
+        # (fly briefly moving faster than max_jump) is re-acquired within a
+        # couple of frames instead of waiting out miss_tolerance.
+        eff_jump = self.max_jump * (1 + self.misses)
+        chosen = greedy_assign((px, py), candidates, eff_jump)
 
         if chosen is None:
             self.misses += 1
             if self.misses > self.miss_tolerance:
-                # Lost for too long. Re-acquire on the strongest candidate (the
-                # single object in the arena) rather than the ROI center: a fly
-                # that lives away from center is otherwise never recovered,
-                # because the centered prediction gates the real candidate out
-                # every frame. Fall back to the center only when there is
-                # nothing to lock onto. Adopt the seed as this frame's fix so we
-                # don't also waste the re-acquisition frame.
+                # Give up on continuity: re-acquire on the strongest candidate
+                # (the single object in the arena), else fall back to center.
                 if candidates:
                     seed = max(candidates, key=lambda c: c.area)
-                    # Seed the filter at the object. Don't call update() here:
-                    # cv2's correct() reads statePre from a preceding predict(),
-                    # which a freshly-built Kalman2D has not run, so it would
-                    # corrupt the state. The seed IS the position this frame.
-                    self.kf = Kalman2D(seed.x, seed.y)
-                    self.misses = 0
+                    self._seed(seed.x, seed.y)
                     return seed, seed.x, seed.y
-                self.kf = Kalman2D(self.cx, self.cy)
-                self.misses = 0
+                self._seed(self.cx, self.cy)
             return None, None, None
 
+        recovering = self.misses > 0
         self.misses = 0
+        self.last = (chosen.x, chosen.y)
+        if recovering:
+            # Re-seed the filter on the object after a loss instead of correcting
+            # the drifted filter (which would leave a bad velocity and re-lose it
+            # next frame). Don't call update() on a fresh Kalman2D: cv2's
+            # correct() reads statePre from a preceding predict().
+            self.kf = Kalman2D(chosen.x, chosen.y)
+            return chosen, chosen.x, chosen.y
         if self.use_kalman:
             x_f, y_f = self.kf.update(chosen.x, chosen.y)
         else:

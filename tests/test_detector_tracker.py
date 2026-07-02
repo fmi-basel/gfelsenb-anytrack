@@ -231,6 +231,31 @@ def test_tracker_reacquires_after_jump_away_from_center():
     assert sum(got[-5:]) == 5             # fully re-acquired off-center (was 0 before the fix)
 
 
+def test_tracker_fast_recovery_via_growing_gate():
+    """A jump beyond max_jump is re-acquired within a few frames via the
+    growing acceptance gate, without waiting out miss_tolerance.
+
+    Regression for arena_01's residual transient gaps: with a large
+    miss_tolerance the old tracker stayed lost for many frames after each fast
+    excursion; the growing gate recovers in ~a couple of frames.
+    """
+    from anytrack.tracker import CentroidTracker
+
+    def cand(x, y):
+        return [EllipseCandidate(x=x, y=y, angle_deg=0.0, cv_angle_deg=0.0,
+                                 major=8.0, minor=4.0, area=50.0)]
+
+    tr = CentroidTracker(center_xy=(100.0, 100.0), max_jump=10.0,
+                         miss_tolerance=100, use_kalman=True)
+    for _ in range(4):
+        tr.step(cand(100.0, 100.0))            # lock
+    # 30px jump (> max_jump) held for a few frames; miss_tolerance is huge, so
+    # recovery must come from the growing gate, not the miss_tolerance re-acquire.
+    got = [tr.step(cand(130.0, 100.0))[0] is not None for _ in range(6)]
+    assert got[-1] is True                     # re-locked
+    assert sum(got) >= 3                        # recovered within a couple frames
+
+
 def test_centroid_contrast():
     cfg = _det_cfg()  # bgdiff_type="dark"
     bg = np.full((50, 50), 200, np.uint8)
