@@ -67,8 +67,11 @@ def extract_roi_video(
     """
     ffmpeg = get_ffmpeg_path()
 
-    # Calculate crop dimensions (square around ROI)
+    # Calculate crop dimensions (square around ROI). Round down to a multiple of
+    # 2*downscale so the downscaled output has EVEN dimensions — libx264 (yuv420p)
+    # rejects odd width/height, which would fail the single-pass encode.
     crop_size = int(2 * roi.r)
+    crop_size -= crop_size % (2 * downscale)
     x0 = int(max(0, roi.cx - roi.r))
     y0 = int(max(0, roi.cy - roi.r))
 
@@ -155,6 +158,7 @@ def _extract_roi_videos_single_pass(
 
     for i, roi in enumerate(rois):
         crop_size = int(2 * roi.r)
+        crop_size -= crop_size % (2 * downscale)  # even output dims for libx264
         x0 = int(max(0, roi.cx - roi.r))
         y0 = int(max(0, roi.cy - roi.r))
         scaled_size = crop_size // downscale if downscale > 1 else crop_size

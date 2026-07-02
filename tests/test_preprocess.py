@@ -29,9 +29,11 @@ def test_single_pass_extracts_all_rois(tmp_path):
     if not _write_video(vid):
         pytest.skip("no MJPG encoder in this OpenCV build")
 
+    # r=39 -> crop 78 -> downscaled 39 (ODD) without rounding; libx264 rejects
+    # odd dims, so this guards the even-rounding fix in single-pass extraction.
     rois = [
-        CircleROI(name="r0", cx=50, cy=50, r=40),
-        CircleROI(name="r1", cx=150, cy=150, r=40),
+        CircleROI(name="r0", cx=50, cy=50, r=39),
+        CircleROI(name="r1", cx=150, cy=150, r=39),
     ]
     out_dir = tmp_path / "roi_out"
     # use_hw_encode=False keeps CI off VideoToolbox; single-pass forces libx264 anyway.
@@ -46,8 +48,7 @@ def test_single_pass_extracts_all_rois(tmp_path):
             width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             cap.release()
             assert n_frames > 0
-            # crop = 2r = 80, downscale 2 -> 40 px wide
-            assert width == int(2 * pr.original_roi.r) // 2
+            assert width % 2 == 0 and width > 0  # even dims (libx264 requires this)
             assert pr.scale_factor == 2.0
     finally:
         cleanup_roi_videos(res)
