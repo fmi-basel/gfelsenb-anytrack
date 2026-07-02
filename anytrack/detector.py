@@ -71,6 +71,42 @@ def compute_diff(gray: np.ndarray, bg_gray: np.ndarray, cfg: AnyTrackConfig) -> 
         return cv2.absdiff(gray, bg_gray)
 
 
+def centroid_contrast(
+    gray: np.ndarray,
+    bg_gray: np.ndarray,
+    cx: float,
+    cy: float,
+    cfg: AnyTrackConfig,
+    window: int = 2,
+) -> float:
+    """Mean background-difference in a small window at ``(cx, cy)``.
+
+    A cheap per-detection contrast proxy for QC: ``O(window^2)`` and directional
+    per ``cfg.bgdiff_type`` (matches :func:`compute_diff`), so it can run in the
+    tracking hot loop without a full-frame diff. Returns NaN if the centroid
+    falls outside the image.
+    """
+    h, w = gray.shape[:2]
+    xi = int(round(cx))
+    yi = int(round(cy))
+    if not (0 <= xi < w and 0 <= yi < h):
+        return float("nan")
+    x0 = max(0, xi - window)
+    x1 = min(w, xi + window + 1)
+    y0 = max(0, yi - window)
+    y1 = min(h, yi + window + 1)
+    g = gray[y0:y1, x0:x1].astype(np.float32)
+    b = bg_gray[y0:y1, x0:x1].astype(np.float32)
+    bgdiff_type = getattr(cfg, "bgdiff_type", "dark")
+    if bgdiff_type == "dark":
+        d = b - g
+    elif bgdiff_type == "bright":
+        d = g - b
+    else:  # "absolute"
+        d = np.abs(g - b)
+    return float(d.mean())
+
+
 def threshold_fg(
     diff: np.ndarray,
     cfg: AnyTrackConfig,

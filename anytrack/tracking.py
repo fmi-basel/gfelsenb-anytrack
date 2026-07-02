@@ -20,6 +20,7 @@ from .detector import (
     EllipseCandidate,
     build_morph_kernels,
     extract_ellipses,
+    centroid_contrast,
 )
 from .tracker import CentroidTracker
 
@@ -159,6 +160,10 @@ def track_video(
             if chosen is None:
                 continue
 
+            # QC diagnostics: chosen is full-frame, so sample ROI-local pixels.
+            contrast = centroid_contrast(
+                roi_gray, bg_roi, chosen.x - x0, chosen.y - y0, cfg
+            )
             obs = EllipseObservation(
                 frame=frame_idx,
                 t_s=t_s,
@@ -170,6 +175,8 @@ def track_video(
                 minor=float(chosen.minor),
                 area=float(chosen.area),
                 contour_n=int(len(chosen.contour)) if chosen.contour is not None else 0,
+                n_candidates=len(cand_global),
+                contrast=contrast,
             )
             tracks[roi.name].observations.append(obs)
 

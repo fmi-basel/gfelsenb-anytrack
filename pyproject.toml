@@ -24,6 +24,7 @@ anytrack-bg = "anytrack.cli:bg_main"
 anytrack-roi = "anytrack.cli:roi_main"
 anytrack-bench = "anytrack.benchmark:main"
 anytrack-crop-export = "anytrack.cropper:main"
+anytrack-qc = "anytrack.qc:main"
 
 [build-system]
 requires = ["hatchling"]

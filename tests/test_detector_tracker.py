@@ -19,6 +19,7 @@ from anytrack.detector import (
     build_morph_kernels,
     extract_ellipses,
     debug_frame,
+    centroid_contrast,
 )
 from anytrack.tracker import CentroidTracker
 from anytrack.models import CircleROI, VideoAsset
@@ -196,7 +197,29 @@ def test_legacy_track_video_runs_and_populates_cv_angle(tmp_path):
     assert not df.empty
     assert "cv_angle_deg" in df.columns
     assert df["cv_angle_deg"].notna().all()
+    # Tier-2 QC columns are populated end-to-end by the tracker.
+    assert "n_candidates" in df.columns and "contrast" in df.columns
+    assert (df["n_candidates"] >= 1).all()
+    assert df["contrast"].notna().any()
     # Tracked the moving object across most frames, roughly along y=40.
     assert len(df) >= n // 2
     assert df["y"].between(30, 50).mean() > 0.8
     assert df["x"].max() - df["x"].min() > 10  # captured the rightward motion
+
+
+def test_centroid_contrast():
+    cfg = _det_cfg()  # bgdiff_type="dark"
+    bg = np.full((50, 50), 200, np.uint8)
+    gray = bg.copy()
+    cv2.circle(gray, (25, 25), 4, 20, -1)  # dark blob on bright background
+
+    # Dark object -> positive contrast (bg brighter than object) at the center.
+    c = centroid_contrast(gray, bg, 25, 25, cfg)
+    assert c > 100
+
+    # Off-image centroid -> NaN.
+    assert np.isnan(centroid_contrast(gray, bg, -5, -5, cfg))
+
+    # "bright" mode inverts the sign for the same dark blob.
+    cfg_bright = _det_cfg(bgdiff_type="bright")
+    assert centroid_contrast(gray, bg, 25, 25, cfg_bright) < -100

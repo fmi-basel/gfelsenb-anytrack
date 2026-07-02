@@ -50,6 +50,10 @@ class EllipseObservation:
     minor: float
     area: float
     contour_n: int
+    # Additive QC diagnostics (Tier-2). Default to a single clean detection so
+    # existing constructors and the reference trajectory stay valid.
+    n_candidates: int = 1
+    contrast: float = float("nan")
 
 @dataclass
 class FlyTrack:

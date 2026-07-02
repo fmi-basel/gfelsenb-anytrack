@@ -19,7 +19,7 @@ from .models import CircleROI, FlyTrack, EllipseObservation, TrackingResult, Vid
 from .background import build_background
 from .config import AnyTrackConfig
 from .preprocess import PreprocessResult
-from .detector import extract_ellipses, build_morph_kernels
+from .detector import extract_ellipses, build_morph_kernels, centroid_contrast
 from .tracker import CentroidTracker
 from .coordinates import scaled_to_full
 
@@ -121,6 +121,8 @@ def track_roi_video(
 
         # Scale coordinates back to original full-frame coordinates.
         x_full, y_full = scaled_to_full(x_f, y_f, scale, x0, y0)
+        # QC diagnostics (chosen is in scaled-local coords, matching gray/bg).
+        contrast = centroid_contrast(gray, bg, chosen.x, chosen.y, cfg)
         obs = EllipseObservation(
             frame=frame_idx,
             t_s=t_s,
@@ -132,6 +134,8 @@ def track_roi_video(
             minor=float(chosen.minor * scale),
             area=float(chosen.area * scale * scale),
             contour_n=0,  # Not available in fast mode
+            n_candidates=len(candidates),
+            contrast=contrast,
         )
         track.observations.append(obs)
 
