@@ -187,7 +187,7 @@ const PIPELINE = [
   {name:"Foreground detection (ellipse fit)", mod:"detector.py", status:"done",
    desc:"Directional bg-subtraction → threshold → morphology → contours → fitEllipse. Shared by both trackers."},
   {name:"Centroid tracking (Kalman + greedy)", mod:"tracker.py", status:"done",
-   desc:"Constant-velocity Kalman + greedy nearest-neighbor + miss/re-init, via CentroidTracker."},
+   desc:"Constant-velocity Kalman + greedy nearest-neighbor + miss/re-init, via CentroidTracker. Re-acquisition snaps to the strongest candidate (the arena's single object), NOT the ROI center: the old center re-init lost off-center flies forever (arena_01 tracked 3% -> 98.9%, arena_03 84.7% -> 99.7% on the localsearch clip; centered flies unchanged)."},
   {name:"Coordinate conversion", mod:"coordinates.py", status:"done",
    desc:"scaled/ROI/crop ↔ full-frame helpers. Fast path routes through it; pose-merge use lands in B."},
   {name:"Dynamic centroid crop", mod:"cropper.py", status:"done",

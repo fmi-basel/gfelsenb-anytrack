@@ -107,7 +107,22 @@ class CentroidTracker:
         if chosen is None:
             self.misses += 1
             if self.misses > self.miss_tolerance:
-                # Lost for too long -> re-initialize near the ROI center.
+                # Lost for too long. Re-acquire on the strongest candidate (the
+                # single object in the arena) rather than the ROI center: a fly
+                # that lives away from center is otherwise never recovered,
+                # because the centered prediction gates the real candidate out
+                # every frame. Fall back to the center only when there is
+                # nothing to lock onto. Adopt the seed as this frame's fix so we
+                # don't also waste the re-acquisition frame.
+                if candidates:
+                    seed = max(candidates, key=lambda c: c.area)
+                    # Seed the filter at the object. Don't call update() here:
+                    # cv2's correct() reads statePre from a preceding predict(),
+                    # which a freshly-built Kalman2D has not run, so it would
+                    # corrupt the state. The seed IS the position this frame.
+                    self.kf = Kalman2D(seed.x, seed.y)
+                    self.misses = 0
+                    return seed, seed.x, seed.y
                 self.kf = Kalman2D(self.cx, self.cy)
                 self.misses = 0
             return None, None, None

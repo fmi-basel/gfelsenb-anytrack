@@ -207,6 +207,30 @@ def test_legacy_track_video_runs_and_populates_cv_angle(tmp_path):
     assert df["x"].max() - df["x"].min() > 10  # captured the rightward motion
 
 
+def test_tracker_reacquires_after_jump_away_from_center():
+    """A fly that loses lock while living away from the ROI center must be
+    re-acquired on its actual candidate, not stall at the (wrong) ROI center.
+
+    Regression for the arena_01 miss bug: re-init used to snap to the ROI
+    center, so an off-center object was gated out forever after any loss.
+    """
+    from anytrack.tracker import CentroidTracker
+
+    def cand(x, y, area=50.0):
+        return [EllipseCandidate(x=x, y=y, angle_deg=0.0, cv_angle_deg=0.0,
+                                 major=8.0, minor=4.0, area=area)]
+
+    tr = CentroidTracker(center_xy=(100.0, 100.0), max_jump=10.0,
+                         miss_tolerance=3, use_kalman=True)
+    # Locked near (200,200), then a jump to (250,200) breaks lock; the object
+    # then stays there — far from the ROI center (100,100).
+    seq = [(200.0, 200.0)] * 5 + [(250.0, 200.0)] * 15
+    got = [tr.step(cand(x, y))[0] is not None for x, y in seq]
+
+    assert got[:5] == [True] * 5          # initial lock
+    assert sum(got[-5:]) == 5             # fully re-acquired off-center (was 0 before the fix)
+
+
 def test_centroid_contrast():
     cfg = _det_cfg()  # bgdiff_type="dark"
     bg = np.full((50, 50), 200, np.uint8)
