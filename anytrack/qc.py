@@ -860,10 +860,16 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help="Cap overlay frames (0 = whole video).")
     ap.add_argument("--overlay-stride", type=int, default=None,
                     help="Render every Nth frame in the overlay (default from config: 5; 1 = every frame).")
+    ap.add_argument("--qc-full", "--qc_full", dest="qc_full", action="store_true",
+                    help="Full-quality overlay: stride=1, downscale=1, crf=16.")
     args = ap.parse_args(argv)
 
     cfg = load_config()
-    if args.overlay_stride is not None:
+    if args.qc_full:
+        cfg.qc_overlay_stride = 1
+        cfg.qc_overlay_downscale = 1
+        cfg.qc_overlay_crf = 16
+    if args.overlay_stride is not None:  # explicit stride wins over --qc-full
         cfg.qc_overlay_stride = max(1, args.overlay_stride)
     if not args.video.exists():
         ap.error(f"video not found: {args.video}")

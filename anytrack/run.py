@@ -71,6 +71,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help="Parallel tracking workers for fast mode (overrides config).")
     ap.add_argument("--qc", action="store_true",
                     help="Also write QC artifacts (overlay/plots/flags/summary).")
+    ap.add_argument("--qc-full", "--qc_full", dest="qc_full", action="store_true",
+                    help="Full-quality overlay: stride=1, downscale=1, crf=16 (implies --qc).")
     ap.add_argument("--qc-max-frames", type=int, default=0,
                     help="Cap QC overlay frames (0 = whole video).")
     ap.add_argument("--qc-overlay-stride", type=int, default=None,
@@ -86,7 +88,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         cfg.roi_downscale = args.downscale
     if args.workers is not None:
         cfg.n_tracking_workers = args.workers
-    if args.qc_overlay_stride is not None:
+    if args.qc_full:
+        cfg.qc_overlay_stride = 1
+        cfg.qc_overlay_downscale = 1
+        cfg.qc_overlay_crf = 16
+    if args.qc_overlay_stride is not None:  # explicit stride wins over --qc-full
         cfg.qc_overlay_stride = max(1, args.qc_overlay_stride)
 
     if not args.video.exists():
@@ -123,7 +129,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     ok(f"tracked {len(df)} rows in {dt:.1f}s ({rows_s:.0f} rows/s)")
     info(f"→ {out}")
 
-    if args.qc:
+    if args.qc or args.qc_full:
         from .qc import run_qc
         step("QC (overlay + plots + flags + summary) …")
         qc_dir = out.parent / f"{out.stem}_qc"

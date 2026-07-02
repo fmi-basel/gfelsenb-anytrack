@@ -89,6 +89,36 @@ def _fake_ensure(v, cfg, background=None):
     return v
 
 
+def test_anytrack_run_qc_full(tmp_path, monkeypatch):
+    video = tmp_path / "vid.avi"
+    if not _write_video(video):
+        pytest.skip("No MJPG encoder available")
+    _write_timing(video.with_suffix(".csv"), n=20)
+
+    captured = {}
+    monkeypatch.setattr(run_mod, "load_config", _synthetic_cfg)
+    monkeypatch.setattr(run_mod, "ensure_rois", _fake_ensure)
+
+    # Capture the cfg passed into run_qc to confirm --qc-full set full quality.
+    import anytrack.qc as qcmod
+    real_run_qc = qcmod.run_qc
+
+    def spy(video, df, cfg, out_dir, **kw):
+        captured["stride"] = cfg.qc_overlay_stride
+        captured["downscale"] = cfg.qc_overlay_downscale
+        captured["crf"] = cfg.qc_overlay_crf
+        return real_run_qc(video, df, cfg, out_dir, **kw)
+    monkeypatch.setattr(qcmod, "run_qc", spy)
+
+    out = tmp_path / "o.parquet"
+    rc = run_mod.main(["--video", str(video), "--output", str(out),
+                       "--no-fast", "--qc-full", "--qc-max-frames", "5"])
+    assert rc == 0
+    # --qc-full implies QC ran, with full-quality overlay params.
+    assert captured == {"stride": 1, "downscale": 1, "crf": 16}
+    assert (out.parent / f"{out.stem}_qc" / "qc_summary.json").exists()
+
+
 def test_anytrack_run_writes_custom_output(tmp_path, monkeypatch):
     video = tmp_path / "vid.avi"
     if not _write_video(video):
