@@ -8,7 +8,36 @@ import math
 
 from .models import CircleROI
 
-def detect_circular_rois( img, 
+def _reading_order(circles):
+    """Order ``(cx, cy, r)`` circles in reading order.
+
+    Rows top→bottom, and left→right within each row. Circles whose centers are
+    within ~one median radius in ``y`` are treated as the same row, so slight
+    vertical jitter between arenas in a row doesn't scramble their left/right
+    order (a plain ``(cy, cx)`` sort does exactly that).
+    """
+    circles = list(circles)
+    if not circles:
+        return []
+    med_r = float(np.median([c[2] for c in circles]))
+    row_tol = max(1.0, med_r)  # same row if centers are within ~one radius in y
+    by_y = sorted(circles, key=lambda c: c[1])
+    rows, cur = [], [by_y[0]]
+    for c in by_y[1:]:
+        row_cy = float(np.mean([x[1] for x in cur]))
+        if abs(c[1] - row_cy) <= row_tol:
+            cur.append(c)
+        else:
+            rows.append(cur)
+            cur = [c]
+    rows.append(cur)
+    ordered = []
+    for row in rows:
+        ordered.extend(sorted(row, key=lambda c: c[0]))  # left -> right within a row
+    return ordered
+
+
+def detect_circular_rois( img,
                             expected_n: int = 4,
                             blur_size: int = 9,
                             dp: float = 1.2,
@@ -46,8 +75,8 @@ def detect_circular_rois( img,
     circles = circles[0]  # (x, y, r)
     # keep biggest/strongest ones if extras appear
     circles = sorted(circles, key=lambda c: c[2], reverse=True)[:expected_n]
-    # optional: sort in reading order (top-left -> top-right -> bottom-left -> bottom-right)
-    circles = sorted(circles, key=lambda c: (c[1], c[0]))
+    # Number in reading order: rows top->bottom, left->right within each row.
+    circles = _reading_order(circles)
     circles_rois = [CircleROI(name=f"{name_prefix}_{i+1:02d}", cx=cx, cy=cy, r=r) for i, (cx, cy, r) in enumerate(circles)]
     return circles_rois  # list of CircleROIs
 
