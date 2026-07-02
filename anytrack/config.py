@@ -99,6 +99,8 @@ class AnyTrackConfig:
     qc_min_contrast: float = 10.0       # flag_low_contrast when detection contrast < this
     qc_montage_max: int = 25            # max flagged-frame thumbnails in the QC montage
     qc_montage_tile: int = 96           # thumbnail size (px) in the QC montage
+    qc_overlay_downscale: int = 2       # downscale factor for the overlay video (1 = full res)
+    qc_overlay_crf: int = 23            # libx264 CRF for the overlay video (lower = better/bigger)
 
     # Local staging (copy source video off slow/network storage before processing).
     # Default off: benchmarks showed the network wasn't the bottleneck (preprocessing

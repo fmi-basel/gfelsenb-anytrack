@@ -19,6 +19,7 @@ until then they degrade gracefully. Background-drift-over-time waits on A4.
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -27,6 +28,7 @@ import pandas as pd
 import cv2
 
 from .writer import write_diagnostics
+from .preprocess import check_ffmpeg_available, get_ffmpeg_path
 
 
 # Per-frame boolean failure-flag columns produced by :func:`compute_flags`.
@@ -518,38 +520,73 @@ def render_overlay(
 ) -> Tuple[Optional[Path], int]:
     """Burn tracking annotations onto the source video.
 
-    Draws ROI circles (if ``video.rois`` is available), a fading trail per
-    track, and a centroid dot colored green (clean) or red (any failure flag).
-    Returns ``(path, frames_written)``; ``path`` is None if no encoder is
-    available. ``max_frames=0`` renders the whole video.
+    Draws ROI circles + name labels, a fading trail per track, and a centroid
+    dot (ROI-colored) with a red ring on flagged frames. The video is written
+    **downscaled** (``cfg.qc_overlay_downscale``) and, when FFmpeg is available,
+    decoded and H.264-encoded through FFmpeg pipes — far faster and far smaller
+    than full-res cv2 ``mp4v``. Falls back to cv2 if FFmpeg is missing.
+
+    Returns ``(path, frames_written)``; ``path`` is None if nothing could be
+    written. ``max_frames=0`` renders the whole video.
     """
     out_path = Path(out_path)
     flagged = compute_flags(df, video, cfg)
-
-    frame_groups = {int(f): g for f, g in flagged.groupby("frame")}
-    trails: Dict[Any, Tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
-    for key, g in flagged.groupby(["roi", "track_id"]):
-        gg = g.sort_values("frame")
-        trails[key] = (gg["frame"].to_numpy(), gg["x"].to_numpy(), gg["y"].to_numpy())
 
     cap = cv2.VideoCapture(str(video.video_path))
     if not cap.isOpened():
         raise FileNotFoundError(f"Could not open video: {video.video_path}")
     fps = cap.get(cv2.CAP_PROP_FPS) or float(getattr(video, "fps_nominal", 0) or 0) or 30.0
-    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    writer = cv2.VideoWriter(str(out_path), fourcc, fps, (w, h))
-    if not writer.isOpened():
-        cap.release()
+    src_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    src_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    cap.release()
+    if src_w <= 0 or src_h <= 0:
         return None, 0
 
+    ds = max(1, int(getattr(cfg, "qc_overlay_downscale", 2)))
+    w = max(2, src_w // ds); w -= w % 2   # even dims for H.264/yuv420p
+    h = max(2, src_h // ds); h -= h % 2
+    sx = w / src_w
+    sy = h / src_h
+    crf = int(getattr(cfg, "qc_overlay_crf", 23))
+
     rois = list(getattr(video, "rois", []) or [])
-    # One stable color per ROI, shared with the timeseries plots. Cover both the
-    # detected ROIs and any roi names present only in the dataframe.
     names = [r.name for r in rois] + [str(n) for n in flagged.get("roi", pd.Series(dtype=str)).unique()]
     colors = roi_color_map(names)
+
+    # Precompute annotation geometry at the DOWNSCALED resolution.
+    rois_s = [(str(r.name), int(r.cx * sx), int(r.cy * sy), max(1, int(r.r * sx)),
+               colors.get(str(r.name), (90, 90, 90))) for r in rois]
+    frame_groups = {int(f): g for f, g in flagged.groupby("frame")}
+    trails: Dict[Any, Tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+    for (rn, tid), g in flagged.groupby(["roi", "track_id"]):
+        gg = g.sort_values("frame")
+        trails[(rn, tid)] = (gg["frame"].to_numpy(),
+                             gg["x"].to_numpy() * sx, gg["y"].to_numpy() * sy)
+    th = max(1, round(2 * sx))
+    dot = max(2, round(4 * sx))
+    ring = max(4, round(8 * sx))
+    F = cv2.FONT_HERSHEY_SIMPLEX
+
+    def annotate(frame, fidx):
+        for (nm, cx, cy, rr, col) in rois_s:
+            cv2.circle(frame, (cx, cy), rr, col, th)
+            cv2.putText(frame, nm, (cx - rr, cy - rr - 4), F, 0.5, col, 1, cv2.LINE_AA)
+        for (rn, _tid), (fr, xs, ys) in trails.items():
+            col = colors.get(str(rn), (0, 180, 180))
+            lo = int(np.searchsorted(fr, fidx - trail_len))
+            hi = int(np.searchsorted(fr, fidx, side="right"))
+            if hi - lo >= 2:
+                pts = np.stack([xs[lo:hi], ys[lo:hi]], axis=1).astype(np.int32)
+                cv2.polylines(frame, [pts], False, col, 1)
+        rows = frame_groups.get(fidx)
+        if rows is not None:
+            for _, r in rows.iterrows():
+                col = colors.get(str(r["roi"]), (0, 255, 0))
+                cx, cy = int(r["x"] * sx), int(r["y"] * sy)
+                cv2.circle(frame, (cx, cy), dot, col, -1)
+                if any(bool(r.get(c, False)) for c in FLAG_COLUMNS):
+                    cv2.circle(frame, (cx, cy), ring, (0, 0, 255), th)
+        cv2.putText(frame, f"frame {fidx}", (8, 22), F, 0.6, (255, 255, 255), 1)
 
     pbar = None
     if show_progress:
@@ -562,44 +599,90 @@ def render_overlay(
         except Exception:
             pbar = None
 
-    fidx = 0
     written = 0
+    try:
+        if check_ffmpeg_available():
+            written = _overlay_ffmpeg(video.video_path, out_path, w, h, fps, crf,
+                                      max_frames, annotate, pbar)
+        else:
+            written = _overlay_cv2(video.video_path, out_path, w, h, fps,
+                                   max_frames, annotate, pbar)
+    finally:
+        if pbar is not None:
+            pbar.close()
+
+    if written <= 0:
+        return None, 0
+    return out_path, written
+
+
+def _overlay_ffmpeg(video_path, out_path, w, h, fps, crf, max_frames, annotate, pbar) -> int:
+    """Decode (scaled) and H.264-encode the annotated overlay through FFmpeg pipes."""
+    ffmpeg = get_ffmpeg_path()
+    dec_cmd = [ffmpeg, "-v", "error", "-i", str(video_path), "-vf", f"scale={w}:{h}"]
+    if max_frames:
+        dec_cmd += ["-frames:v", str(int(max_frames))]
+    dec_cmd += ["-f", "rawvideo", "-pix_fmt", "bgr24", "-"]
+    enc_cmd = [ffmpeg, "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "bgr24",
+               "-s", f"{w}x{h}", "-r", f"{fps:.6f}", "-i", "-",
+               "-c:v", "libx264", "-preset", "ultrafast", "-crf", str(crf),
+               "-pix_fmt", "yuv420p", str(out_path)]
+
+    frame_bytes = w * h * 3
+    dec = subprocess.Popen(dec_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    enc = subprocess.Popen(enc_cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL)
+    written = 0
+    fidx = 0
+    try:
+        while True:
+            buf = dec.stdout.read(frame_bytes)
+            if len(buf) < frame_bytes:
+                break
+            frame = np.frombuffer(buf, np.uint8).reshape(h, w, 3).copy()
+            annotate(frame, fidx)
+            enc.stdin.write(frame.tobytes())
+            written += 1
+            fidx += 1
+            if pbar is not None:
+                pbar.update(1)
+            if max_frames and written >= max_frames:
+                break
+    finally:
+        try:
+            dec.stdout.close()
+        except Exception:
+            pass
+        dec.terminate()
+        try:
+            enc.stdin.close()
+        except Exception:
+            pass
+        enc.wait()
+        dec.wait()
+    return written
+
+
+def _overlay_cv2(video_path, out_path, w, h, fps, max_frames, annotate, pbar) -> int:
+    """Fallback: cv2 decode + resize + annotate + mp4v write (no FFmpeg)."""
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        return 0
+    writer = cv2.VideoWriter(str(out_path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
+    if not writer.isOpened():
+        cap.release()
+        return 0
+    written = 0
+    fidx = 0
     while True:
         ok, frame = cap.read()
         if not ok:
             break
         if frame.ndim == 2:
             frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
-
-        # ROI arenas: filled label + circle in the ROI's own color.
-        for roi in rois:
-            col = colors.get(str(roi.name), (90, 90, 90))
-            c = (int(roi.cx), int(roi.cy))
-            cv2.circle(frame, c, int(roi.r), col, 2)
-            cv2.putText(frame, str(roi.name), (int(roi.cx - roi.r), int(roi.cy - roi.r) - 6),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, col, 2, cv2.LINE_AA)
-
-        # Fading trails, colored per ROI.
-        for (roi_name, _tid), (fr, xs, ys) in trails.items():
-            col = colors.get(str(roi_name), (0, 180, 180))
-            lo = int(np.searchsorted(fr, fidx - trail_len))
-            hi = int(np.searchsorted(fr, fidx, side="right"))
-            if hi - lo >= 2:
-                pts = np.stack([xs[lo:hi], ys[lo:hi]], axis=1).astype(np.int32)
-                cv2.polylines(frame, [pts], False, col, 1)
-
-        # Centroids: ROI-colored dot; a red ring marks a flagged frame.
-        rows = frame_groups.get(fidx)
-        if rows is not None:
-            for _, r in rows.iterrows():
-                col = colors.get(str(r["roi"]), (0, 255, 0))
-                cx, cy = int(r["x"]), int(r["y"])
-                cv2.circle(frame, (cx, cy), 4, col, -1)
-                if any(bool(r.get(c, False)) for c in FLAG_COLUMNS):
-                    cv2.circle(frame, (cx, cy), 8, (0, 0, 255), 2)
-
-        cv2.putText(frame, f"frame {fidx}", (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        if (frame.shape[1], frame.shape[0]) != (w, h):
+            frame = cv2.resize(frame, (w, h), interpolation=cv2.INTER_AREA)
+        annotate(frame, fidx)
         writer.write(frame)
         written += 1
         fidx += 1
@@ -607,12 +690,9 @@ def render_overlay(
             pbar.update(1)
         if max_frames and written >= max_frames:
             break
-
-    if pbar is not None:
-        pbar.close()
     cap.release()
     writer.release()
-    return out_path, written
+    return written
 
 
 def run_qc(
