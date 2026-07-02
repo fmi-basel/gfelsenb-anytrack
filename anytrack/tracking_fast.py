@@ -2,13 +2,14 @@
 Fast parallel tracking for pre-cropped ROI videos.
 
 Optimized for small pre-extracted ROI videos with sequential frame reading.
+Detection and centroid linking are delegated to the shared ``detector`` and
+``tracker`` modules.
 """
 from __future__ import annotations
 
 import multiprocessing as mp
-from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Dict, Optional, Callable, Tuple
+from typing import List, Dict, Optional, Callable
 import numpy as np
 import cv2
 import pandas as pd
@@ -17,132 +18,9 @@ from .models import CircleROI, FlyTrack, EllipseObservation, TrackingResult, Vid
 from .background import build_background
 from .config import AnyTrackConfig
 from .preprocess import PreprocessResult
-
-
-@dataclass
-class _EllipseCandidate:
-    """Ellipse candidate in local ROI coordinates."""
-    x: float
-    y: float
-    angle_deg: float
-    cv_angle_deg: float
-    major: float
-    minor: float
-    area: float
-    contour: Optional[np.ndarray] = None  # Store contour for debugging
-
-
-class _Kalman2D:
-    """Constant velocity Kalman filter for position tracking."""
-
-    def __init__(self, x: float, y: float):
-        self.kf = cv2.KalmanFilter(4, 2)
-        self.kf.transitionMatrix = np.array(
-            [[1, 0, 1, 0], [0, 1, 0, 1], [0, 0, 1, 0], [0, 0, 0, 1]], np.float32
-        )
-        self.kf.measurementMatrix = np.array([[1, 0, 0, 0], [0, 1, 0, 0]], np.float32)
-        self.kf.processNoiseCov = np.eye(4, dtype=np.float32) * 1e-2
-        self.kf.measurementNoiseCov = np.eye(2, dtype=np.float32) * 1e-1
-        self.kf.errorCovPost = np.eye(4, dtype=np.float32)
-        self.kf.statePost = np.array([[x], [y], [0], [0]], np.float32)
-
-    def predict(self) -> Tuple[float, float]:
-        s = self.kf.predict()
-        return float(s[0, 0]), float(s[1, 0])
-
-    def update(self, x: float, y: float) -> Tuple[float, float]:
-        m = np.array([[x], [y]], np.float32)
-        s = self.kf.correct(m)
-        return float(s[0, 0]), float(s[1, 0])
-
-
-def _extract_ellipses(
-    gray: np.ndarray,
-    bg_gray: np.ndarray,
-    cfg: AnyTrackConfig,
-    kernel_open: Optional[np.ndarray] = None,
-    kernel_close: Optional[np.ndarray] = None,
-) -> List[_EllipseCandidate]:
-    """Extract ellipse candidates from a frame."""
-    # Compute background difference based on type
-    bgdiff_type = getattr(cfg, 'bgdiff_type', 'dark')
-    if bgdiff_type == "dark":
-        # Only pixels darker than background
-        diff = cv2.subtract(bg_gray, gray)
-    elif bgdiff_type == "bright":
-        # Only pixels brighter than background
-        diff = cv2.subtract(gray, bg_gray)
-    else:  # "absolute"
-        # Absolute difference (original behavior)
-        diff = cv2.absdiff(gray, bg_gray)
-
-    # Threshold
-    if cfg.thr_method == "fixed":
-        _, bw = cv2.threshold(diff, int(cfg.thr_fixed), 255, cv2.THRESH_BINARY)
-    else:
-        _, bw = cv2.threshold(diff, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-
-    # Morphology
-    if kernel_open is not None:
-        bw = cv2.morphologyEx(bw, cv2.MORPH_OPEN, kernel_open)
-    if kernel_close is not None:
-        bw = cv2.morphologyEx(bw, cv2.MORPH_CLOSE, kernel_close)
-
-    # Find contours
-    cnts, _ = cv2.findContours(bw, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    candidates: List[_EllipseCandidate] = []
-    for c in cnts:
-        area = float(cv2.contourArea(c))
-        if area < cfg.expected_fly_area_min or area > cfg.expected_fly_area_max:
-            continue
-        if len(c) < 5:
-            continue
-
-        (x, y), (MA, ma), angle = cv2.fitEllipse(c)
-        major = float(max(MA, ma))
-        minor = float(min(MA, ma))
-        # Fix angle: OpenCV has y-axis flipped, so geometric angle = -opencv_angle (in radians)
-        geometric_angle = angle - 90
-
-        candidates.append(_EllipseCandidate(
-            x=float(x),
-            y=float(y),
-            angle_deg=geometric_angle,
-            cv_angle_deg=angle,
-            major=major,
-            minor=minor,
-            area=area,
-            contour=c,
-        ))
-
-    # Sort by area (largest first)
-    candidates.sort(key=lambda e: e.area, reverse=True)
-    return candidates[:max(1, cfg.max_centroids_per_roi)]
-
-
-def _greedy_assign(
-    pred: Tuple[float, float],
-    candidates: List[_EllipseCandidate],
-    max_jump: float,
-) -> Optional[_EllipseCandidate]:
-    """Assign closest candidate within max_jump distance."""
-    if not candidates:
-        return None
-
-    px, py = pred
-    best = None
-    best_d = float("inf")
-
-    for c in candidates:
-        d = float(np.hypot(c.x - px, c.y - py))
-        if d < best_d:
-            best_d = d
-            best = c
-
-    if best is not None and best_d <= max_jump:
-        return best
-    return None
+from .detector import extract_ellipses, build_morph_kernels
+from .tracker import CentroidTracker
+from .coordinates import scaled_to_full
 
 
 def track_roi_video(
@@ -187,19 +65,12 @@ def track_roi_video(
         bg = bg_model.gmm
 
     # Pre-allocate morphology kernels
-    kernel_open = None
-    kernel_close = None
-    if cfg.morph_open > 0:
-        kernel_open = cv2.getStructuringElement(
-            cv2.MORPH_ELLIPSE, (cfg.morph_open, cfg.morph_open)
-        )
-    if cfg.morph_close > 0:
-        kernel_close = cv2.getStructuringElement(
-            cv2.MORPH_ELLIPSE, (cfg.morph_close, cfg.morph_close)
-        )
+    kernel_open, kernel_close = build_morph_kernels(cfg)
 
-    # Scale max_jump for downscaled video
+    # Scale linking params for the downscaled ROI video.
     scaled_max_jump = cfg.max_jump_px / scale
+    scaled_cx = roi.r / scale
+    scaled_cy = roi.r / scale
 
     # Open video
     cap = cv2.VideoCapture(str(roi_video_path))
@@ -207,12 +78,12 @@ def track_roi_video(
         raise FileNotFoundError(f"Could not open ROI video: {roi_video_path}")
 
     track = FlyTrack(roi_name=roi.name, track_id=1)
-    kf: Optional[_Kalman2D] = None
-    misses = 0
-
-    # Center of ROI in scaled coordinates
-    scaled_cx = roi.r / scale
-    scaled_cy = roi.r / scale
+    tracker = CentroidTracker(
+        center_xy=(scaled_cx, scaled_cy),
+        max_jump=scaled_max_jump,
+        miss_tolerance=cfg.miss_tolerance,
+        use_kalman=cfg.use_kalman,
+    )
 
     # Extract timing as arrays
     frame_indices = timing["frame"].values.astype(np.int32)
@@ -228,49 +99,23 @@ def track_roi_video(
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-        candidates = _extract_ellipses(
+        candidates = extract_ellipses(
             gray, bg, cfg,
             kernel_open=kernel_open,
             kernel_close=kernel_close,
         )
 
-        # Initialize Kalman if needed
-        if kf is None:
-            if candidates:
-                kf = _Kalman2D(candidates[0].x, candidates[0].y)
-            else:
-                kf = _Kalman2D(scaled_cx, scaled_cy)
-
-        # Predict position
-        if cfg.use_kalman:
-            px, py = kf.predict()
-        else:
-            px, py = scaled_cx, scaled_cy
-
-        # Assign candidate
-        chosen = _greedy_assign((px, py), candidates, scaled_max_jump)
-
+        chosen, x_f, y_f = tracker.step(candidates)
         if chosen is None:
-            misses += 1
-            if misses > cfg.miss_tolerance:
-                kf = _Kalman2D(scaled_cx, scaled_cy)
-                misses = 0
             continue
 
-        misses = 0
-
-        # Update Kalman
-        if cfg.use_kalman:
-            x_f, y_f = kf.update(chosen.x, chosen.y)
-        else:
-            x_f, y_f = chosen.x, chosen.y
-
-        # Scale coordinates back to original frame
+        # Scale coordinates back to original full-frame coordinates.
+        x_full, y_full = scaled_to_full(x_f, y_f, scale, x0, y0)
         obs = EllipseObservation(
             frame=frame_idx,
             t_s=t_s,
-            x=float(x_f * scale + x0),
-            y=float(y_f * scale + y0),
+            x=float(x_full),
+            y=float(y_full),
             angle_deg=float(chosen.angle_deg),
             cv_angle_deg=float(chosen.cv_angle_deg),
             major=float(chosen.major * scale),

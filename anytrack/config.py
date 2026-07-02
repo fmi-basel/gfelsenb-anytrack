@@ -77,6 +77,31 @@ class AnyTrackConfig:
     use_hw_encode: bool = True  # Try hardware encoding (VideoToolbox on macOS)
     cleanup_roi_videos: bool = True  # Delete temp ROI videos after tracking
 
+    # Background adaptation (opt-in). Off by default so tracking output is
+    # unchanged vs. the static GMM; enable for slowly drifting illumination.
+    bg_drift_correction: bool = False   # Correct global brightness drift from safe pixels
+    bg_protect_radius_px: float = 25.0  # Full-res radius of the centroid exclusion zone
+    bg_fg_dilate_px: int = 7            # Dilation (px) of the foreground exclusion mask
+    bg_asym_update: bool = False        # Asymmetric per-pixel update on safe pixels
+    bg_step_up: float = 1.0             # Update step toward brighter observations
+    bg_step_down: float = 0.02          # Update step toward darker observations (<< step_up)
+
+    # Dynamic centroid crops (for pose / labeling)
+    crop_size: int = 128                # NxN crop centered on the tracked centroid
+    crop_pad_mode: str = "background"   # "background" or "edge"
+    crop_export_dir: str = ""           # Where exported crops + manifest are written
+
+    # Output
+    output_format: str = "parquet"      # "parquet" or "csv"
+    output_dir: str = ""                # Default directory for saved results
+
+    # Local staging (copy source video off slow/network storage before processing).
+    # Default off: benchmarks showed the network wasn't the bottleneck (preprocessing
+    # is decode-bound). Set "auto"/"always" for genuinely slow/high-latency storage.
+    stage_video_locally: str = "never"  # "never" | "auto" (copy off non-local storage) | "always"
+    stage_dir: str = ""                 # Local scratch dir (default: platformdirs cache)
+    cleanup_staged: bool = False        # Delete the staged copy after each run (else cache it)
+
 def config_path() -> Path:
     cfg_dir = Path(user_config_dir(APP_NAME))
     cfg_dir.mkdir(parents=True, exist_ok=True)

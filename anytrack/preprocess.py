@@ -159,8 +159,8 @@ def _extract_roi_videos_single_pass(
         y0 = int(max(0, roi.cy - roi.r))
         scaled_size = crop_size // downscale if downscale > 1 else crop_size
 
-        # Filter for this ROI: [0:v]crop=...,scale=...[outN]
-        filter_str = f"[0:v]crop={crop_size}:{crop_size}:{x0}:{y0}"
+        # Filter for this ROI: [vN]crop=...,scale=...[outN]  (fed by split, below)
+        filter_str = f"[v{i}]crop={crop_size}:{crop_size}:{x0}:{y0}"
         if downscale > 1:
             filter_str += f",scale={scaled_size}:{scaled_size}"
         filter_str += f"[out{i}]"
@@ -169,12 +169,11 @@ def _extract_roi_videos_single_pass(
         # Output args for this ROI
         output_path = output_dir / f"roi_{roi.name}.mp4"
 
-        if use_hw_encode:
-            encoder = "h264_videotoolbox"
-            encoder_opts = ["-q:v", "50"]
-        else:
-            encoder = "libx264"
-            encoder_opts = ["-preset", "ultrafast", "-crf", "18"]
+        # Single-pass MUST use software encode: 4 simultaneous VideoToolbox
+        # sessions serialize on the HW encoder (~1 fps). libx264 ultrafast across
+        # cores is ~2x faster than the sequential-HW path on this hardware.
+        encoder = "libx264"
+        encoder_opts = ["-preset", "ultrafast", "-crf", "18"]
 
         output_args.extend([
             "-map", f"[out{i}]",
@@ -192,7 +191,10 @@ def _extract_roi_videos_single_pass(
             crop_offset=(x0, y0),
         )
 
-    filter_complex = ";".join(filter_parts)
+    # Decode the source ONCE, split it into N identical streams, crop each —
+    # this replaces N separate full-video decode passes with a single decode.
+    split = f"[0:v]split={len(rois)}" + "".join(f"[v{i}]" for i in range(len(rois)))
+    filter_complex = ";".join([split, *filter_parts])
 
     cmd = [
         ffmpeg,
@@ -211,14 +213,14 @@ def _extract_roi_videos_single_pass(
         )
 
         if result.returncode != 0:
-            # If hardware encoder failed, fall back to sequential extraction
-            if use_hw_encode and "videotoolbox" in result.stderr.lower():
-                return _extract_roi_videos_sequential(
-                    input_video, rois, output_dir,
-                    downscale=downscale,
-                    use_hw_encode=False,
-                )
-            raise RuntimeError(f"FFmpeg failed: {result.stderr}")
+            # Single-pass graph failed (e.g. HW-encoder contention across 4
+            # simultaneous outputs). Fall back to the proven sequential
+            # extractor, preserving the encoder choice — never worse than before.
+            return _extract_roi_videos_sequential(
+                input_video, rois, output_dir,
+                downscale=downscale,
+                use_hw_encode=use_hw_encode,
+            )
 
     except subprocess.TimeoutExpired:
         raise RuntimeError("FFmpeg timed out during ROI extraction")
@@ -291,14 +293,17 @@ def extract_roi_videos(
     else:
         output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Sequential extraction is fastest with VideoToolbox hardware encoding
-    results = _extract_roi_videos_sequential(
+    # Single-pass: decode the source ONCE and crop all ROIs (falls back to the
+    # sequential per-ROI extractor if the single FFmpeg graph fails).
+    if progress_hook:
+        progress_hook("preprocessing",
+                      {"roi": "single-pass", "index": 0, "total": 1, "percent": 0.0})
+    results = _extract_roi_videos_single_pass(
         input_video=input_video,
         rois=rois,
         output_dir=output_dir,
         downscale=downscale,
         use_hw_encode=use_hw_encode,
-        progress_hook=progress_hook,
     )
 
     if progress_hook:

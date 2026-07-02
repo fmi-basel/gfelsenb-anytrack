@@ -185,7 +185,7 @@ def compute_average_background(
     return avg_bg_uint8
 
 
-def fit_gmm_background(
+def _fit_gmm_background_sklearn(
     samples: np.ndarray,
     bic_improvement: float = 10.0,
     lowp: float = 120.0,
@@ -194,7 +194,8 @@ def fit_gmm_background(
     random_state: int = 0,
     debug_hook: Optional[Callable] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Fit per-pixel GMM (1-2 components) using BIC model selection.
+    """Reference per-pixel GMM via sklearn (kept for validation; the vectorized
+    ``fit_gmm_background`` below is the default). Fit 1-2 components with BIC.
 
     Returns:
         gmm_bg: (H, W) uint8 - brighter component mean
@@ -272,6 +273,121 @@ def fit_gmm_background(
     })
 
     return bg_img_uint8, thr_img
+
+
+# ---------------------------------------------------------------------------
+# Vectorized per-pixel GMM (numpy EM over all pixels at once).
+# Same model + BIC selection as the sklearn reference above, but fits every
+# pixel simultaneously instead of a Python loop of per-pixel sklearn fits.
+# ---------------------------------------------------------------------------
+
+def _norm_pdf(x: np.ndarray, mu: np.ndarray, var: np.ndarray) -> np.ndarray:
+    return np.exp(-0.5 * (x - mu) ** 2 / var) / np.sqrt(2.0 * np.pi * var)
+
+
+def _em2_1d(X: np.ndarray, reg_covar: float, max_iter: int = 100, tol: float = 1e-4):
+    """Vectorized 1-D two-component Gaussian EM over the rows of X (Pa, N)."""
+    Pa, N = X.shape
+    Xd = X.astype(np.float64)
+    mu1 = np.percentile(Xd, 25.0, axis=1)
+    mu2 = np.percentile(Xd, 75.0, axis=1)
+    mu2 = np.where(mu2 <= mu1, mu1 + 1.0, mu2)          # keep components distinct
+    v0 = Xd.var(axis=1) + reg_covar
+    v1 = v0.copy()
+    v2 = v0.copy()
+    w1 = np.full(Pa, 0.5)
+    w2 = np.full(Pa, 0.5)
+    eps = 1e-300
+    prev_ll = None
+    for _ in range(max_iter):
+        p1 = w1[:, None] * _norm_pdf(Xd, mu1[:, None], v1[:, None])
+        p2 = w2[:, None] * _norm_pdf(Xd, mu2[:, None], v2[:, None])
+        s = p1 + p2 + eps
+        r1 = p1 / s
+        r2 = p2 / s
+        N1 = r1.sum(axis=1)
+        N2 = r2.sum(axis=1)
+        N1c = np.maximum(N1, 1e-8)
+        N2c = np.maximum(N2, 1e-8)
+        mu1 = (r1 * Xd).sum(axis=1) / N1c
+        mu2 = (r2 * Xd).sum(axis=1) / N2c
+        v1 = (r1 * (Xd - mu1[:, None]) ** 2).sum(axis=1) / N1c + reg_covar
+        v2 = (r2 * (Xd - mu2[:, None]) ** 2).sum(axis=1) / N2c + reg_covar
+        w1 = N1 / N
+        w2 = N2 / N
+        ll = float(np.log(s).sum())
+        if prev_ll is not None and abs(ll - prev_ll) <= tol * Pa:
+            break
+        prev_ll = ll
+    p1 = w1[:, None] * _norm_pdf(Xd, mu1[:, None], v1[:, None])
+    p2 = w2[:, None] * _norm_pdf(Xd, mu2[:, None], v2[:, None])
+    logL2 = np.log(p1 + p2 + eps).sum(axis=1)
+    return mu1, mu2, v1, v2, w1, w2, logL2
+
+
+def fit_gmm_background(
+    samples: np.ndarray,
+    bic_improvement: float = 10.0,
+    lowp: float = 120.0,
+    min_std: float = 10.0,
+    reg_covar: float = 1e-3,
+    random_state: int = 0,
+    debug_hook: Optional[Callable] = None,
+    max_iter: int = 100,
+    chunk: int = 200_000,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Fit a per-pixel 1-2 component GMM (BIC model selection), vectorized.
+
+    Numpy EM over all pixels at once instead of a per-pixel sklearn fit — same
+    model and selection rule, orders of magnitude faster. Returns:
+        gmm_bg:     (H, W) uint8   — brighter-component mean (clamped to lowp)
+        thresholds: (H, W) float32 — component midpoint where 2 comps used, else NaN
+
+    Pixels with <5 unique values or std < min_std are treated as background
+    (their mean), matching the reference implementation. The per-pixel threshold
+    is advisory and not used by the tracker.
+    """
+    N, H, W = samples.shape
+    P = H * W
+    vals = samples.reshape(N, P).astype(np.float32).T   # (P, N)
+    bg = np.empty(P, dtype=np.float32)
+    thr = np.full(P, np.nan, dtype=np.float32)
+    ln_n = float(np.log(N))
+    k1, k2 = 2, 5
+
+    for s0 in range(0, P, chunk):
+        X = vals[s0:s0 + chunk]                          # (Pb, N)
+        mean = X.mean(axis=1)
+        var1 = X.var(axis=1)
+        std = np.sqrt(var1)
+        Xs = np.sort(X, axis=1)
+        n_unique = 1 + (np.diff(Xs, axis=1) != 0).sum(axis=1)
+        active = ~((n_unique < 5) | (std < min_std))
+
+        bg_c = mean.astype(np.float32).copy()            # skipped / 1-comp -> mean
+        thr_c = np.full(X.shape[0], np.nan, dtype=np.float32)
+
+        if active.any():
+            Xa = X[active]
+            muA = mean[active].astype(np.float64)
+            vA = (var1[active] + reg_covar).astype(np.float64)
+            logL1 = (-0.5 * N * np.log(2.0 * np.pi * vA)
+                     - ((Xa - muA[:, None]) ** 2).sum(axis=1) / (2.0 * vA))
+            mu1, mu2, v1, v2, w1, w2, logL2 = _em2_1d(Xa, reg_covar, max_iter)
+            use_two = (-2.0 * logL2 + k2 * ln_n + bic_improvement) < (-2.0 * logL1 + k1 * ln_n)
+            bright = np.maximum(mu1, mu2)
+            bg_a = np.where(use_two, np.maximum(bright, lowp), muA)
+            thr_a = np.where(use_two, (mu1 + mu2) / 2.0, np.nan)
+            bg_c[active] = bg_a.astype(np.float32)
+            thr_c[active] = thr_a.astype(np.float32)
+
+        bg[s0:s0 + chunk] = bg_c
+        thr[s0:s0 + chunk] = thr_c
+
+    bg_img = np.clip(bg.reshape(H, W), 0, 255).astype(np.uint8)
+    thr_img = thr.reshape(H, W)
+    _emit_debug(debug_hook, "gmm_complete", {"gmm": bg_img, "thresholds": thr_img})
+    return bg_img, thr_img
 
 
 def detect_arenas(

@@ -19,11 +19,19 @@ class TrackingSession:
     dataframe: Optional[pd.DataFrame] = None
 
     def run(self, progress_hook=None, cancel_event=None, progress_every: int = 1) -> pd.DataFrame:
+        import dataclasses
+        from .staging import stage_video, unstage
+
+        # Stage the source off slow/network storage to a local disk if warranted.
+        staged_path, staged = stage_video(self.video.video_path, self.cfg)
+        run_video = (
+            dataclasses.replace(self.video, video_path=staged_path) if staged else self.video
+        )
         try:
             if self.cfg.fast_mode:
                 # Fast mode: FFmpeg preprocessing + parallel ROI tracking
                 self.result = track_video_fast(
-                    self.video,
+                    run_video,
                     self.cfg,
                     progress_hook=progress_hook,
                     cleanup=self.cfg.cleanup_roi_videos,
@@ -31,7 +39,7 @@ class TrackingSession:
             else:
                 # Legacy mode: single-pass tracking
                 self.result = track_video(
-                    self.video,
+                    run_video,
                     self.cfg,
                     progress_hook=progress_hook,
                     cancel_event=cancel_event,
@@ -44,6 +52,13 @@ class TrackingSession:
                 except Exception:
                     pass
             raise
+        finally:
+            if staged:
+                unstage(staged_path, self.cfg)
+
+        # Keep the original asset on the result (not the transient staged copy).
+        if self.result is not None:
+            self.result.video = self.video
 
         # If the user requested cancellation, return empty DataFrame and emit cancelled.
         try:

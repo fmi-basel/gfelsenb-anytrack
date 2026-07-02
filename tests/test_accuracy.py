@@ -25,9 +25,8 @@ import pytest
 from anytrack.config import AnyTrackConfig
 from anytrack.models import VideoAsset
 from anytrack.io import load_video_asset
-from anytrack.roi import detect_circular_rois
-from anytrack.background import build_background
 from anytrack.tracking import track_video
+from anytrack.benchmark import ensure_rois
 
 
 REFERENCE_FILE = Path(__file__).parent / "reference_trajectory.parquet"
@@ -44,22 +43,7 @@ def run_tracking_for_validation(
     video = load_video_asset(video_path, timing_path)
 
     # Detect ROIs if not present
-    if not video.rois:
-        bg = build_background(
-            str(video.video_path),
-            method=cfg.bg_method,
-            k_min=max(10, cfg.bg_min_frames // 3),
-            k_max=max(60, cfg.bg_min_frames),
-        ).image
-        video.rois = detect_circular_rois(
-            bg,
-            dp=cfg.roi_hough_dp,
-            min_dist_ratio=cfg.roi_hough_min_dist_ratio,
-            param1=cfg.roi_hough_param1,
-            param2=cfg.roi_hough_param2,
-            min_radius_ratio=cfg.min_radius_ratio,
-            max_radius_ratio=cfg.max_radius_ratio,
-        )
+    ensure_rois(video, cfg)
 
     # Limit to n_frames
     if video.timing is not None and len(video.timing) > n_frames:

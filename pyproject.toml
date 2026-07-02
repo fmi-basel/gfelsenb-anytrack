@@ -22,6 +22,10 @@ dependencies = [
 anytrack = "anytrack.cli:main"
 anytrack-bg = "anytrack.cli:bg_main"
 anytrack-roi = "anytrack.cli:roi_main"
+anytrack-bench = "anytrack.benchmark:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 [tool.uv]
 # uv will generate uv.lock when you run `uv lock`.

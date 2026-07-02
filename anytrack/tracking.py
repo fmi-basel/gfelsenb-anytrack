@@ -1,142 +1,37 @@
+"""
+Legacy single-pass tracker (``cfg.fast_mode = False``).
+
+Iterates the full video once, tracking every ROI per frame. Detection and
+centroid linking are delegated to the shared ``detector`` and ``tracker``
+modules; this file only orchestrates the frame loop and coordinate handling.
+"""
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import List, Optional, Tuple, Dict, Callable
+from typing import Dict, Optional, Callable
 import threading
 import numpy as np
 import cv2
-import pandas as pd
-from tqdm import tqdm
 
-from .models import VideoAsset, CircleROI, FlyTrack, EllipseObservation, TrackingResult
+from .models import VideoAsset, FlyTrack, EllipseObservation, TrackingResult
 from .background import build_background
-from .roi import crop_roi, roi_mask
+from .roi import roi_mask
 from .config import AnyTrackConfig
+from .detector import (
+    EllipseCandidate,
+    build_morph_kernels,
+    threshold_fg,
+    extract_ellipses,
+)
+from .tracker import Kalman2D, CentroidTracker, greedy_assign
 
-@dataclass
-class EllipseCandidate:
-    x: float
-    y: float
-    angle_deg: float
-    cv_angle_deg: float
-    major: float
-    minor: float
-    area: float
-    contour: np.ndarray
+# Backwards-compatible private aliases. External importers (notably the GUI
+# tracking-debug window) still import these names from this module; they are
+# repointed to detector.debug_frame in a later refactor step.
+_build_morph_kernels = build_morph_kernels
+_threshold_fg = threshold_fg
+_extract_ellipses = extract_ellipses
+_greedy_assign = greedy_assign
 
-class Kalman2D:
-    # Constant velocity Kalman filter using OpenCV
-    def __init__(self, x: float, y: float):
-        self.kf = cv2.KalmanFilter(4, 2)
-        # state: [x, y, vx, vy]
-        self.kf.transitionMatrix = np.array([[1,0,1,0],[0,1,0,1],[0,0,1,0],[0,0,0,1]], np.float32)
-        self.kf.measurementMatrix = np.array([[1,0,0,0],[0,1,0,0]], np.float32)
-        self.kf.processNoiseCov = np.eye(4, dtype=np.float32) * 1e-2
-        self.kf.measurementNoiseCov = np.eye(2, dtype=np.float32) * 1e-1
-        self.kf.errorCovPost = np.eye(4, dtype=np.float32)
-        self.kf.statePost = np.array([[x],[y],[0],[0]], np.float32)
-
-    def predict(self) -> Tuple[float, float]:
-        s = self.kf.predict()
-        return float(s[0, 0]), float(s[1, 0])
-
-    def update(self, x: float, y: float) -> Tuple[float, float]:
-        m = np.array([[x], [y]], np.float32)
-        s = self.kf.correct(m)
-        return float(s[0, 0]), float(s[1, 0])
-
-def _build_morph_kernels(cfg: AnyTrackConfig) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
-    """Pre-allocate morphology structuring elements."""
-    kernel_open = None
-    kernel_close = None
-    if cfg.morph_open > 0:
-        kernel_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (cfg.morph_open, cfg.morph_open))
-    if cfg.morph_close > 0:
-        kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (cfg.morph_close, cfg.morph_close))
-    return kernel_open, kernel_close
-
-
-def _threshold_fg(
-    diff: np.ndarray,
-    cfg: AnyTrackConfig,
-    kernel_open: Optional[np.ndarray] = None,
-    kernel_close: Optional[np.ndarray] = None,
-) -> np.ndarray:
-    if cfg.thr_method == "fixed":
-        _, bw = cv2.threshold(diff, int(cfg.thr_fixed), 255, cv2.THRESH_BINARY)
-    else:
-        _, bw = cv2.threshold(diff, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    if kernel_open is not None:
-        bw = cv2.morphologyEx(bw, cv2.MORPH_OPEN, kernel_open)
-    if kernel_close is not None:
-        bw = cv2.morphologyEx(bw, cv2.MORPH_CLOSE, kernel_close)
-    return bw
-
-def _extract_ellipses(
-    roi_gray: np.ndarray,
-    bg_roi_gray: np.ndarray,
-    cfg: AnyTrackConfig,
-    mask: Optional[np.ndarray] = None,
-    kernel_open: Optional[np.ndarray] = None,
-    kernel_close: Optional[np.ndarray] = None,
-) -> List[EllipseCandidate]:
-    # Compute background difference based on type
-    bgdiff_type = getattr(cfg, 'bgdiff_type', 'dark')
-    if bgdiff_type == "dark":
-        # Only pixels darker than background
-        diff = cv2.subtract(bg_roi_gray, roi_gray)
-    elif bgdiff_type == "bright":
-        # Only pixels brighter than background
-        diff = cv2.subtract(roi_gray, bg_roi_gray)
-    else:  # "absolute"
-        # Absolute difference (original behavior)
-        diff = cv2.absdiff(roi_gray, bg_roi_gray)
-
-    if mask is not None:
-        diff = cv2.bitwise_and(diff, diff, mask=mask)
-    bw = _threshold_fg(diff, cfg, kernel_open, kernel_close)
-
-    cnts, _ = cv2.findContours(bw, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    cand: List[EllipseCandidate] = []
-    for c in cnts:
-        area = float(cv2.contourArea(c))
-        if area < cfg.expected_fly_area_min or area > cfg.expected_fly_area_max:
-            continue
-        if len(c) < 5:
-            continue
-        (x, y), (MA, ma), angle = cv2.fitEllipse(c)
-        major = float(max(MA, ma))
-        minor = float(min(MA, ma))
-        # Fix angle: OpenCV has y-axis flipped, so geometric angle = -opencv_angle (in degrees)
-        geometric_angle = angle - 90
-        cand.append(EllipseCandidate(
-            x=float(x), 
-            y=float(y), 
-            angle_deg=geometric_angle, 
-            cv_angle_deg=angle,
-            major=major, 
-            minor=minor, 
-            area=area, 
-            contour=c
-        ))
-    # Sort: largest area first (often best)
-    cand.sort(key=lambda e: e.area, reverse=True)
-    return cand[: max(1, cfg.max_centroids_per_roi)]
-
-def _greedy_assign(pred: Tuple[float, float], candidates: List[EllipseCandidate], max_jump: float) -> Optional[EllipseCandidate]:
-    if not candidates:
-        return None
-    px, py = pred
-    best = None
-    best_d = float("inf")
-    for c in candidates:
-        d = float(np.hypot(c.x - px, c.y - py))
-        if d < best_d:
-            best_d = d
-            best = c
-    if best is not None and best_d <= max_jump:
-        return best
-    return None
 
 def track_video(
     video: VideoAsset,
@@ -163,15 +58,17 @@ def track_video(
     if not video.rois:
         raise ValueError("No ROIs found/defined on video. Run ROI detection/definition first.")
 
-    # Create per-ROI single track (extend later for multi-target)
+    # Per-ROI single track + tracker (extend later for multi-target).
     tracks: Dict[str, FlyTrack] = {}
-    kalman: Dict[str, Optional[Kalman2D]] = {}
-    misses: Dict[str, int] = {}
-
+    trackers: Dict[str, CentroidTracker] = {}
     for roi in video.rois:
         tracks[roi.name] = FlyTrack(roi_name=roi.name, track_id=1)
-        kalman[roi.name] = None
-        misses[roi.name] = 0
+        trackers[roi.name] = CentroidTracker(
+            center_xy=(roi.cx, roi.cy),
+            max_jump=cfg.max_jump_px,
+            miss_tolerance=cfg.miss_tolerance,
+            use_kalman=cfg.use_kalman,
+        )
 
     cap = cv2.VideoCapture(str(video.video_path))
     if not cap.isOpened():
@@ -190,9 +87,8 @@ def track_video(
     except Exception:
         pass
 
-    # === PHASE 1 OPTIMIZATIONS ===
     # Pre-allocate morphology kernels (avoid creating per-frame)
-    kernel_open, kernel_close = _build_morph_kernels(cfg)
+    kernel_open, kernel_close = build_morph_kernels(cfg)
 
     # Pre-compute ROI masks and background crops (they don't change per-frame)
     roi_precomputed: Dict[str, dict] = {}
@@ -239,48 +135,38 @@ def track_video(
 
         for roi in video.rois:
             pre = roi_precomputed[roi.name]
-            x0, y0, x1, y1 = pre["x0"], pre["y0"], pre["x1"], pre["y1"]
-            roi_gray = gray[y0:y1, x0:x1]
+            x0, y0 = pre["x0"], pre["y0"]
+            roi_gray = gray[pre["y0"]:pre["y1"], pre["x0"]:pre["x1"]]
             bg_roi = pre["bg_roi"]
             mask = pre["mask"]
 
-            cand = _extract_ellipses(
+            cand = extract_ellipses(
                 roi_gray, bg_roi, cfg,
                 mask=mask,
                 kernel_open=kernel_open,
                 kernel_close=kernel_close,
             )
 
-            kf = kalman[roi.name]
-            if kf is None:
-                # initialize with best candidate (or ROI center)
-                if cand:
-                    kf = Kalman2D(cand[0].x + x0, cand[0].y + y0)
-                else:
-                    kf = Kalman2D(roi.cx, roi.cy)
-                kalman[roi.name] = kf
-
-            px, py = kf.predict() if cfg.use_kalman else (roi.cx, roi.cy)
-            # candidates are in ROI-local coords; convert
+            # Candidates are ROI-local; convert to full-frame before linking so
+            # the tracker (initialized at the full-frame ROI center) stays in
+            # one coordinate system.
             cand_global = [
-                EllipseCandidate(c.x + x0, c.y + y0, c.angle_deg, c.major, c.minor, c.area, c.contour)
+                EllipseCandidate(
+                    x=c.x + x0,
+                    y=c.y + y0,
+                    angle_deg=c.angle_deg,
+                    cv_angle_deg=c.cv_angle_deg,
+                    major=c.major,
+                    minor=c.minor,
+                    area=c.area,
+                    contour=c.contour,
+                )
                 for c in cand
             ]
-            chosen = _greedy_assign((px, py), cand_global, cfg.max_jump_px)
 
+            chosen, x_f, y_f = trackers[roi.name].step(cand_global)
             if chosen is None:
-                misses[roi.name] += 1
-                if misses[roi.name] > cfg.miss_tolerance:
-                    # re-init near ROI center
-                    kalman[roi.name] = Kalman2D(roi.cx, roi.cy)
-                    misses[roi.name] = 0
                 continue
-
-            misses[roi.name] = 0
-            if cfg.use_kalman:
-                x_f, y_f = kf.update(chosen.x, chosen.y)
-            else:
-                x_f, y_f = chosen.x, chosen.y
 
             obs = EllipseObservation(
                 frame=frame_idx,
@@ -292,7 +178,7 @@ def track_video(
                 major=float(chosen.major),
                 minor=float(chosen.minor),
                 area=float(chosen.area),
-                contour_n=int(len(chosen.contour)),
+                contour_n=int(len(chosen.contour)) if chosen.contour is not None else 0,
             )
             tracks[roi.name].observations.append(obs)
 
