@@ -1,0 +1,22 @@
+[metadata]
+timestamp = "2026-07-02T17:36:22.065712"
+git_commit = "dad1f24"
+
+[video]
+path = "localsearch_2025-12-11T09_34_21.avi"
+resolution = "2176x2176"
+n_rois = 4
+total_frames = 18005
+
+[stages]
+n_rois = 4
+n_frames = 18003
+preprocess_s = 32.29
+bg_build_s_mean = 1.17
+bg_build_s_max = 1.29
+track_s_mean = 20.31
+track_s_max = 21.75
+tracking_fps_per_roi = 889.0
+tracking_crops_per_s = 3310.7
+video_fps_excl_preprocess = 781.5
+video_fps_incl_preprocess = 325.4
