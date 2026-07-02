@@ -95,6 +95,11 @@ class AnyTrackConfig:
     output_format: str = "parquet"      # "parquet" or "csv"
     output_dir: str = ""                # Default directory for saved results
 
+    # Quality control
+    qc_min_contrast: float = 10.0       # flag_low_contrast when detection contrast < this
+    qc_montage_max: int = 25            # max flagged-frame thumbnails in the QC montage
+    qc_montage_tile: int = 96           # thumbnail size (px) in the QC montage
+
     # Local staging (copy source video off slow/network storage before processing).
     # Default off: benchmarks showed the network wasn't the bottleneck (preprocessing
     # is decode-bound). Set "auto"/"always" for genuinely slow/high-latency storage.

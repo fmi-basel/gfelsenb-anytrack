@@ -128,6 +128,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                      background=bg_img)
         ok(f"QC → {qc_dir}" + (f" (overlay {res['overlay_frames']} frames)"
                                if res.get("overlay_path") else " (overlay skipped)"))
+        if res.get("report_path"):
+            info(f"report: {res['report_path']}")
 
     if args.crops:
         from .cropper import export_crops

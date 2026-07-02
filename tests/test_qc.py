@@ -16,6 +16,10 @@ from anytrack.qc import (
     run_qc,
     plot_timeseries,
     plot_coverage,
+    plot_kinematics,
+    plot_occupancy,
+    render_flagged_montage,
+    write_html_report,
     roi_color_map,
     main as qc_main,
     FLAG_COLUMNS,
@@ -50,6 +54,18 @@ def test_compute_flags_each_kind():
     assert list(out["flag_crop_oob"]) == [False, False, False, False, True]
     # no n_candidates column -> multi flag always False
     assert not out["flag_multi"].any()
+
+
+def test_compute_flags_low_contrast():
+    cfg = AnyTrackConfig(qc_min_contrast=20.0)
+    df = pd.DataFrame({
+        "roi": ["r0"] * 3, "track_id": [0] * 3, "frame": [0, 1, 2],
+        "x": [50.0] * 3, "y": [50.0] * 3, "area": [50.0] * 3,
+        "contrast": [100.0, 5.0, float("nan")],
+    })
+    out = compute_flags(df, _video(), cfg)
+    # only the mid frame (contrast 5 < 20); NaN contrast is not flagged
+    assert list(out["flag_low_contrast"]) == [False, True, False]
 
 
 def test_compute_flags_multi_from_n_candidates():
@@ -133,6 +149,10 @@ def test_run_qc_writes_artifacts(tmp_path):
     assert (out_dir / "qc_diagnostics.png").exists()
     assert (out_dir / "qc_timeseries.png").exists()
     assert (out_dir / "qc_coverage.png").exists()
+    assert (out_dir / "qc_kinematics.png").exists()
+    assert (out_dir / "qc_occupancy.png").exists()
+    assert (out_dir / "qc_report.html").exists()
+    assert res["report_path"].exists()
     # background PNG is built from the video and saved
     assert res["background_path"] is not None and res["background_path"].exists()
     # overlay is best-effort (depends on an mp4 encoder being present)
@@ -167,6 +187,37 @@ def test_roi_color_map_stable():
     assert m["a"] != m["b"]
     # deterministic (sorted): "a" gets palette[0]
     assert roi_color_map(["a", "b"]) == roi_color_map(["b", "a"])
+
+
+def test_flagged_montage(tmp_path):
+    video_path = tmp_path / "vid.avi"
+    if not _write_video(video_path):
+        pytest.skip("No MJPG encoder available")
+    video = _video(w=64, h=64, n=10, path=video_path,
+                   rois=[CircleROI(name="r0", cx=32, cy=32, r=31)])
+    # area far out of range -> every frame flagged -> montage has tiles
+    cfg = AnyTrackConfig(expected_fly_area_min=10, expected_fly_area_max=100, qc_montage_tile=48)
+    df = pd.DataFrame({
+        "roi": ["r0"] * 6, "track_id": [0] * 6, "frame": np.arange(6),
+        "x": [32.0] * 6, "y": [32.0] * 6, "area": [9000.0] * 6,  # > max -> flag_area
+    })
+    out = tmp_path / "montage.png"
+    path, n = render_flagged_montage(video, df, cfg, out)
+    assert path is not None and path.exists()
+    assert n > 0
+
+
+def test_write_html_report(tmp_path):
+    (tmp_path / "qc_diagnostics.png").write_bytes(b"x")  # dummy referenced file
+    summary = {"n_rois": 1, "n_frames": 10,
+               "per_roi": {"r0": {"frames_missing": 0, "flag_area": 2}}}
+    report = write_html_report(tmp_path, summary,
+                               {"diagnostics": tmp_path / "qc_diagnostics.png",
+                                "overlay": None})
+    assert report.exists()
+    html = report.read_text()
+    assert "anytrack QC report" in html
+    assert "qc_diagnostics.png" in html and "r0" in html
 
 
 def test_qc_cli(tmp_path):

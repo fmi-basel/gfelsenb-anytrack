@@ -30,7 +30,7 @@ from .writer import write_diagnostics
 
 
 # Per-frame boolean failure-flag columns produced by :func:`compute_flags`.
-FLAG_COLUMNS = ["flag_area", "flag_jump", "flag_crop_oob", "flag_multi"]
+FLAG_COLUMNS = ["flag_area", "flag_jump", "flag_crop_oob", "flag_multi", "flag_low_contrast"]
 
 # Visually distinct BGR colors cycled per ROI (shared by overlay + plots).
 _ROI_PALETTE_BGR = [
@@ -99,6 +99,12 @@ def compute_flags(df: pd.DataFrame, video, cfg) -> pd.DataFrame:
         out["flag_multi"] = out["n_candidates"].fillna(1) > 1
     else:
         out["flag_multi"] = False
+
+    if "contrast" in out.columns:
+        thr = float(getattr(cfg, "qc_min_contrast", 0.0))
+        out["flag_low_contrast"] = out["contrast"].notna() & (out["contrast"] < thr)
+    else:
+        out["flag_low_contrast"] = False
 
     return out
 
@@ -235,6 +241,7 @@ def plot_timeseries(df: pd.DataFrame, cfg, out_dir: Path) -> List[Path]:
     metrics = [
         ("area", "contour/ellipse\narea (px)"),
         ("n_candidates", "candidates\nper frame"),
+        ("contrast", "detection\ncontrast"),
         ("major", "ellipse\nmajor (px)"),
         ("minor", "ellipse\nminor (px)"),
         ("angle_deg", "ellipse\nangle (deg)"),
@@ -305,6 +312,199 @@ def plot_coverage(df: pd.DataFrame, video, out_dir: Path) -> List[Path]:
     fig.savefig(path, dpi=110)
     plt.close(fig)
     return [path]
+
+
+def plot_kinematics(df: pd.DataFrame, cfg, out_dir: Path) -> List[Path]:
+    """Per-ROI kinematics timeseries (speed, angular speed, distance-from-center)."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    out_dir = Path(out_dir)
+    if df.empty:
+        return []
+
+    metrics = [
+        ("speed_mm_s", "speed (mm/s)"),
+        ("ang_speed_deg_s", "angular speed\n(deg/s)"),
+        ("r_center_mm", "dist. from\ncenter (mm)"),
+    ]
+    present = [(c, lbl) for c, lbl in metrics if c in df.columns]
+    if not present:
+        return []
+
+    colors = roi_color_map(df["roi"].unique())
+    x = "t_s" if "t_s" in df.columns else "frame"
+    fig, axes = plt.subplots(len(present), 1, figsize=(14, 2.2 * len(present)),
+                             sharex=True, squeeze=False)
+    for ax, (col, lbl) in zip(axes[:, 0], present):
+        for roi, g in df.groupby("roi"):
+            gg = g.sort_values(x)
+            ax.plot(gg[x], gg[col], lw=0.6, label=str(roi),
+                    color=_bgr_to_mpl(colors[str(roi)]))
+        ax.set_ylabel(lbl, fontsize=8)
+        ax.grid(alpha=0.25)
+    axes[0, 0].legend(fontsize=7, ncol=min(4, max(1, df["roi"].nunique())), loc="upper right")
+    axes[-1, 0].set_xlabel(x)
+    fig.suptitle("Per-ROI kinematics")
+    fig.tight_layout()
+    path = out_dir / "qc_kinematics.png"
+    fig.savefig(path, dpi=110)
+    plt.close(fig)
+    return [path]
+
+
+def plot_occupancy(df: pd.DataFrame, video, out_dir: Path) -> List[Path]:
+    """Per-ROI 2D occupancy heatmap of centroid positions (thigmotaxis etc.)."""
+    import math
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    out_dir = Path(out_dir)
+    if df.empty or "x" not in df.columns or "y" not in df.columns:
+        return []
+
+    rois = sorted(df["roi"].astype(str).unique())
+    geom = {str(r.name): r for r in (getattr(video, "rois", []) or [])}
+    ncol = min(len(rois), 3)
+    nrow = math.ceil(len(rois) / ncol)
+    fig, axes = plt.subplots(nrow, ncol, figsize=(4.2 * ncol, 4.2 * nrow), squeeze=False)
+    for ax in axes.flat:
+        ax.axis("off")
+    for i, roi in enumerate(rois):
+        ax = axes[i // ncol][i % ncol]
+        ax.axis("on")
+        g = df[df["roi"].astype(str) == roi]
+        ax.hist2d(g["x"].to_numpy(), g["y"].to_numpy(), bins=50, cmap="magma")
+        ax.set_title(f"{roi} occupancy", fontsize=9)
+        ax.set_aspect("equal")
+        ax.invert_yaxis()
+        r = geom.get(roi)
+        if r is not None:
+            ax.add_patch(plt.Circle((r.cx, r.cy), r.r, fill=False, color="cyan", lw=1))
+    fig.tight_layout()
+    path = out_dir / "qc_occupancy.png"
+    fig.savefig(path, dpi=110)
+    plt.close(fig)
+    return [path]
+
+
+def render_flagged_montage(video, df: pd.DataFrame, cfg, out_path: Path) -> Tuple[Optional[Path], int]:
+    """Thumbnail grid of the worst flagged frames (so you can see *why* flagged).
+
+    Extracts centroid crops from the source video at flagged frames, tiles them
+    into a grid, and annotates each with ROI/frame and the flags that fired.
+    """
+    from .cropper import extract_crop
+
+    out_path = Path(out_path)
+    flagged = compute_flags(df, video, cfg)
+    present_flags = [c for c in FLAG_COLUMNS if c in flagged.columns]
+    if not present_flags:
+        return None, 0
+    mask = flagged[present_flags].any(axis=1)
+    fl = flagged[mask]
+    if fl.empty:
+        return None, 0
+
+    max_tiles = int(getattr(cfg, "qc_montage_max", 25))
+    tile = int(getattr(cfg, "qc_montage_tile", 96))
+    if len(fl) > max_tiles:  # spread the sample across the flagged set
+        fl = fl.iloc[np.linspace(0, len(fl) - 1, max_tiles).astype(int)]
+
+    need: Dict[int, List] = {}
+    for _, r in fl.iterrows():
+        need.setdefault(int(r["frame"]), []).append(r)
+
+    cap = cv2.VideoCapture(str(video.video_path))
+    if not cap.isOpened():
+        return None, 0
+    max_needed = max(need)
+    tiles: List[np.ndarray] = []
+    fidx = 0
+    while True:
+        okk, frame = cap.read()
+        if not okk:
+            break
+        if fidx in need:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
+            for r in need[fidx]:
+                crop, _, _, _ = extract_crop(gray, float(r["x"]), float(r["y"]), tile)
+                cimg = cv2.cvtColor(crop, cv2.COLOR_GRAY2BGR)
+                flags = [c.replace("flag_", "") for c in present_flags if bool(r.get(c, False))]
+                cv2.putText(cimg, f"{r['roi']} f{int(r['frame'])}", (3, 12),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.32, (0, 255, 0), 1, cv2.LINE_AA)
+                cv2.putText(cimg, ",".join(flags), (3, tile - 5),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.30, (0, 0, 255), 1, cv2.LINE_AA)
+                tiles.append(cimg)
+        fidx += 1
+        if fidx > max_needed:
+            break
+    cap.release()
+
+    if not tiles:
+        return None, 0
+    ncol = min(5, len(tiles))
+    nrow = (len(tiles) + ncol - 1) // ncol
+    grid = np.zeros((nrow * tile, ncol * tile, 3), np.uint8)
+    for k, c in enumerate(tiles):
+        rr, cc = divmod(k, ncol)
+        grid[rr * tile:(rr + 1) * tile, cc * tile:(cc + 1) * tile] = c
+    cv2.imwrite(str(out_path), grid)
+    return out_path, len(tiles)
+
+
+def write_html_report(out_dir: Path, summary: Dict[str, Any], artifacts: Dict[str, Optional[Path]]) -> Path:
+    """Bundle the QC summary table + all PNGs into a single shareable HTML page."""
+    out_dir = Path(out_dir)
+
+    # Summary table (per-ROI stats).
+    per_roi = summary.get("per_roi", {})
+    cols: List[str] = []
+    for stats in per_roi.values():
+        for k in stats:
+            if k not in cols:
+                cols.append(k)
+    head = "".join(f"<th>{c}</th>" for c in cols)
+    rows = ""
+    for roi, stats in per_roi.items():
+        cells = "".join(f"<td>{stats.get(c, '')}</td>" for c in cols)
+        rows += f"<tr><th>{roi}</th>{cells}</tr>"
+    table = f"<table><tr><th>roi</th>{head}</tr>{rows}</table>" if per_roi else "<p>No data.</p>"
+
+    # Embed each artifact image by its filename (relative to this HTML).
+    order = ["background", "overlay", "diagnostics", "timeseries", "kinematics",
+             "occupancy", "coverage", "montage"]
+    imgs = ""
+    for name in order:
+        p = artifacts.get(name)
+        if p is None:
+            continue
+        p = Path(p)
+        if p.suffix.lower() == ".mp4":
+            imgs += (f"<figure><figcaption>{name}</figcaption>"
+                     f"<video controls width='900' src='{p.name}'></video></figure>")
+        else:
+            imgs += (f"<figure><figcaption>{name}</figcaption>"
+                     f"<img src='{p.name}' style='max-width:100%'></figure>")
+
+    html = f"""<!doctype html><html><head><meta charset="utf-8">
+<title>anytrack QC report</title>
+<style>
+ body{{font-family:system-ui,sans-serif;margin:24px;color:#222}}
+ h1{{font-size:20px}} table{{border-collapse:collapse;margin:12px 0}}
+ th,td{{border:1px solid #ccc;padding:4px 8px;font-size:13px;text-align:right}}
+ figure{{margin:18px 0}} figcaption{{font-weight:600;margin-bottom:6px}}
+</style></head><body>
+<h1>anytrack QC report</h1>
+<p>{summary.get('n_rois', 0)} ROI(s), {summary.get('n_frames', 0)} frames.</p>
+{table}
+{imgs}
+</body></html>"""
+    path = out_dir / "qc_report.html"
+    path.write_text(html, encoding="utf-8")
+    return path
 
 
 def render_overlay(
@@ -458,10 +658,15 @@ def run_qc(
     summary_path = out_dir / "qc_summary.json"
     summary_path.write_text(json.dumps(summary, indent=2))
 
-    plots = (
-        plot_diagnostics(df, video, cfg, out_dir)
-        + plot_timeseries(df, cfg, out_dir)
-        + plot_coverage(df, video, out_dir)
+    diagnostics = plot_diagnostics(df, video, cfg, out_dir)
+    timeseries = plot_timeseries(df, cfg, out_dir)
+    kinematics = plot_kinematics(df, cfg, out_dir)
+    occupancy = plot_occupancy(df, video, out_dir)
+    coverage = plot_coverage(df, video, out_dir)
+    plots = diagnostics + timeseries + kinematics + occupancy + coverage
+
+    montage_path, n_montage = render_flagged_montage(
+        video, df, cfg, out_dir / "qc_flagged_montage.png"
     )
 
     overlay_path: Optional[Path] = None
@@ -472,12 +677,29 @@ def run_qc(
             max_frames=max_frames, show_progress=show_progress,
         )
 
+    def _first(paths):
+        return paths[0] if paths else None
+
+    report_path = write_html_report(out_dir, summary, {
+        "background": background_path,
+        "overlay": overlay_path,
+        "diagnostics": _first(diagnostics),
+        "timeseries": _first(timeseries),
+        "kinematics": _first(kinematics),
+        "occupancy": _first(occupancy),
+        "coverage": _first(coverage),
+        "montage": montage_path,
+    })
+
     return {
         "summary": summary,
         "summary_path": summary_path,
         "flags_path": flags_path,
         "background_path": background_path,
         "plots": plots,
+        "montage_path": montage_path,
+        "montage_tiles": n_montage,
+        "report_path": report_path,
         "overlay_path": overlay_path,
         "overlay_frames": n_overlay,
     }
