@@ -17,6 +17,7 @@ from anytrack.qc import (
     plot_timeseries,
     plot_coverage,
     plot_kinematics,
+    plot_drift,
     plot_occupancy,
     render_flagged_montage,
     write_html_report,
@@ -179,6 +180,17 @@ def test_plot_timeseries_all_ellipse_props(tmp_path):
     # coverage raster too
     cpaths = plot_coverage(df, _video(n=n), tmp_path)
     assert cpaths and cpaths[0].exists()
+
+
+def test_plot_drift_present_and_absent(tmp_path):
+    cfg = AnyTrackConfig()
+    n = 10
+    base = pd.DataFrame({"roi": ["r0"] * n, "track_id": [0] * n, "frame": np.arange(n),
+                         "x": [10.0] * n, "y": [10.0] * n})
+    assert plot_drift(base, cfg, tmp_path) == []                         # no column
+    assert plot_drift(base.assign(bg_drift=[float("nan")] * n), cfg, tmp_path) == []  # all-NaN
+    paths = plot_drift(base.assign(bg_drift=np.linspace(-5, 5, n)), cfg, tmp_path)
+    assert paths and paths[0].exists()                                    # real drift -> figure
 
 
 def test_roi_color_map_stable():

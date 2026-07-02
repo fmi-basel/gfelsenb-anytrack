@@ -146,6 +146,7 @@ def track_roi_video(
             contour_n=0,  # Not available in fast mode
             n_candidates=len(candidates),
             contrast=contrast,
+            bg_drift=(bg_state.last_drift if bg_state is not None else float("nan")),
         )
         track.observations.append(obs)
 

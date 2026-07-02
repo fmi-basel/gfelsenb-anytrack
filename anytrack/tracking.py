@@ -192,6 +192,7 @@ def track_video(
                 contour_n=int(len(chosen.contour)) if chosen.contour is not None else 0,
                 n_candidates=len(cand_global),
                 contrast=contrast,
+                bg_drift=(bg_state.last_drift if bg_state is not None else float("nan")),
             )
             tracks[roi.name].observations.append(obs)
 

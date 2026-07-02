@@ -540,6 +540,7 @@ class BackgroundState:
         else:
             self.arena = None
         self.prev_fg: Optional[np.ndarray] = None
+        self.last_drift: float = 0.0  # brightness drift estimated on the most recent frame
         self._dk = (cv2.getStructuringElement(cv2.MORPH_ELLIPSE,
                                               (2 * self.fg_dilate + 1, 2 * self.fg_dilate + 1))
                     if self.fg_dilate > 0 else None)
@@ -570,6 +571,7 @@ class BackgroundState:
                 self.bg = np.where(m, updated, self.bg)
         else:
             drift = 0.0
+        self.last_drift = drift
         return np.clip(self.bg + drift, 0.0, 255.0).astype(np.uint8)
 
     def note_foreground(self, contour, shape) -> None:

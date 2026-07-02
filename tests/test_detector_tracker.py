@@ -226,6 +226,8 @@ def test_legacy_track_video_with_drift_correction(tmp_path):
     assert len(df) >= n // 2
     assert df["y"].between(30, 50).mean() > 0.8
     assert df["x"].max() - df["x"].min() > 10
+    # drift correction records a per-frame drift for the QC plot
+    assert "bg_drift" in df.columns and df["bg_drift"].notna().any()
 
 
 def test_tracker_reacquires_after_jump_away_from_center():

@@ -199,7 +199,7 @@ const PIPELINE = [
   {name:"Output (tracks / pose / diagnostics)", mod:"writer.py", status:"done",
    desc:"Parquet-default (CSV kept) writer + streaming TrackWriter implemented. Pose/diagnostics schemas + session auto-save wiring land with A7/B."},
   {name:"QC overlays & diagnostics", mod:"qc.py", status:"done",
-   desc:"Post-hoc QC (A9): background PNG, ROI-colored overlay (arena circles+labels, per-ROI centroids/trails, red flag ring), distributions figure, per-ROI timeseries (area/candidates/contrast/major/minor/angle), kinematics timeseries (speed/ang-speed/dist), occupancy heatmaps, coverage raster, flagged-frame montage, per-frame flags (incl. low-contrast) + JSON summary, and a single qc_report.html bundling it all. anytrack-qc CLI. bg-drift-over-time waits on A4."},
+   desc:"Post-hoc QC (A9): background PNG, ROI-colored overlay (arena circles+labels, per-ROI centroids/trails, red flag ring), distributions figure, per-ROI timeseries (area/candidates/contrast/major/minor/angle), kinematics timeseries (speed/ang-speed/dist), occupancy heatmaps, coverage raster, flagged-frame montage, per-frame flags (incl. low-contrast) + JSON summary, background drift-over-time (shown only when bg_drift_correction was on, fed by the A4 BackgroundState via the additive bg_drift column), and a single qc_report.html bundling it all. anytrack-qc CLI."},
 ];
 
 const MODULES = [
@@ -231,7 +231,7 @@ const MILESTONE_A = [
   {code:"A6", t:"writer.py", status:"done", n:"Parquet/CSV + streaming, schema round-trip tested."},
   {code:"A7", t:"config + session + GUI wiring", status:"done", n:"Config fields done; GUI debug window repointed to detector.debug_frame; x_roi/y_roi wired into session output; tracking.py compat shims removed; crop-export CLI added (anytrack-crop-export). Optional in-GUI crop-export menu + session pose stage → B."},
   {code:"A8", t:"repair tests + benchmark.py", status:"done", n:"Stale API fixed; benchmark promoted + CLI; testpaths pinned."},
-  {code:"A9", t:"qc.py", status:"done", n:"Overlay video, 2x3 diagnostics figure, failure flags + JSON summary, anytrack-qc CLI. Tier-2 n_candidates/contrast populated by both trackers; bg-drift plot awaits A4."},
+  {code:"A9", t:"qc.py", status:"done", n:"Overlay video, 2x3 diagnostics figure, failure flags + JSON summary, anytrack-qc CLI. Tier-2 n_candidates/contrast populated by both trackers; bg-drift-over-time plot wired (fed by A4's bg_drift column, shown only when drift correction is on)."},
 ];
 
 const MILESTONE_B = [

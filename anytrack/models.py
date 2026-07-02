@@ -54,6 +54,7 @@ class EllipseObservation:
     # existing constructors and the reference trajectory stay valid.
     n_candidates: int = 1
     contrast: float = float("nan")
+    bg_drift: float = float("nan")  # background brightness drift (only when bg_drift_correction on)
 
 @dataclass
 class FlyTrack:

@@ -356,6 +356,40 @@ def plot_kinematics(df: pd.DataFrame, cfg, out_dir: Path) -> List[Path]:
     return [path]
 
 
+def plot_drift(df: pd.DataFrame, cfg, out_dir: Path) -> List[Path]:
+    """Per-ROI background brightness drift over time.
+
+    Only produced when drift data exists (i.e. bg_drift_correction was on);
+    returns [] otherwise, so it doesn't clutter the default (static-bg) QC.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    out_dir = Path(out_dir)
+    if df.empty or "bg_drift" not in df.columns or not df["bg_drift"].notna().any():
+        return []
+
+    colors = roi_color_map(df["roi"].unique())
+    x = "t_s" if "t_s" in df.columns else "frame"
+    fig, ax = plt.subplots(figsize=(14, 3.2))
+    for roi, g in df.groupby("roi"):
+        gg = g.sort_values(x)
+        ax.plot(gg[x], gg["bg_drift"], lw=0.7, label=str(roi),
+                color=_bgr_to_mpl(colors[str(roi)]))
+    ax.axhline(0, color="k", lw=0.5, alpha=0.4)
+    ax.set_ylabel("bg brightness drift")
+    ax.set_xlabel(x)
+    ax.set_title("Background drift over time (bg_drift_correction)")
+    ax.legend(fontsize=7, ncol=min(4, max(1, df["roi"].nunique())))
+    ax.grid(alpha=0.25)
+    fig.tight_layout()
+    path = out_dir / "qc_drift.png"
+    fig.savefig(path, dpi=110)
+    plt.close(fig)
+    return [path]
+
+
 def plot_occupancy(df: pd.DataFrame, video, out_dir: Path) -> List[Path]:
     """Per-ROI 2D occupancy heatmap of centroid positions (thigmotaxis etc.)."""
     import math
@@ -477,7 +511,7 @@ def write_html_report(out_dir: Path, summary: Dict[str, Any], artifacts: Dict[st
 
     # Embed each artifact image by its filename (relative to this HTML).
     order = ["background", "overlay", "diagnostics", "timeseries", "kinematics",
-             "occupancy", "coverage", "montage"]
+             "drift", "occupancy", "coverage", "montage"]
     imgs = ""
     for name in order:
         p = artifacts.get(name)
@@ -792,7 +826,8 @@ def run_qc(
     kinematics = plot_kinematics(df, cfg, out_dir)
     occupancy = plot_occupancy(df, video, out_dir)
     coverage = plot_coverage(df, video, out_dir)
-    plots = diagnostics + timeseries + kinematics + occupancy + coverage
+    drift = plot_drift(df, cfg, out_dir)  # empty unless bg_drift_correction was on
+    plots = diagnostics + timeseries + kinematics + occupancy + coverage + drift
 
     montage_path, n_montage = render_flagged_montage(
         video, df, cfg, out_dir / "qc_flagged_montage.png"
@@ -815,6 +850,7 @@ def run_qc(
         "diagnostics": _first(diagnostics),
         "timeseries": _first(timeseries),
         "kinematics": _first(kinematics),
+        "drift": _first(drift),
         "occupancy": _first(occupancy),
         "coverage": _first(coverage),
         "montage": montage_path,
