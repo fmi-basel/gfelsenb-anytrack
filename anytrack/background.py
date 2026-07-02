@@ -621,3 +621,22 @@ def build_background(
         arena_mask=arena_mask,
         arena_circles=arena_circles,
     )
+
+
+def build_background_image(video_path, cfg) -> np.ndarray:
+    """Build the model background image using the config's GMM/arena params.
+
+    Thin wrapper around :func:`build_background` with the standard config
+    mapping, so ROI detection and QC share one background definition.
+    """
+    return build_background(
+        str(video_path),
+        n_samples=cfg.gmm_n_samples,
+        bic_improvement=cfg.gmm_bic_improvement,
+        min_std=cfg.gmm_min_std,
+        reg_covar=cfg.gmm_reg_covar,
+        lowp=cfg.gmm_lowp,
+        arena_detection=cfg.arena_detection_enabled,
+        arena_min_area_frac=cfg.arena_min_area_frac,
+        arena_blur_sigma=cfg.arena_blur_sigma,
+    ).image

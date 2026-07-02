@@ -18,6 +18,7 @@ from .io import load_video_asset
 from .session import TrackingSession
 from .writer import write_tracks, default_output_path
 from .benchmark import ensure_rois
+from .background import build_background_image
 from .cli_progress import TqdmProgress, header, step, ok, info
 
 
@@ -96,7 +97,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     info(f"mode: {'fast' if cfg.fast_mode else 'legacy'}   frames: {video.frame_count}   timing: {Path(timing).name}")
 
     step("Detect ROIs (background + arena detection) …")
-    ensure_rois(video, cfg)
+    # Build the model background once; reuse it for ROI detection and QC.
+    bg_img = build_background_image(video.video_path, cfg) if (not video.rois or args.qc) else None
+    ensure_rois(video, cfg, background=bg_img)
     if not video.rois:
         info("No ROIs detected; nothing to track.")
         return 1
@@ -121,7 +124,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         step("QC (overlay + plots + flags + summary) …")
         qc_dir = out.parent / f"{out.stem}_qc"
         res = run_qc(video, df, cfg, qc_dir, overlay=True,
-                     max_frames=args.qc_max_frames, show_progress=True)
+                     max_frames=args.qc_max_frames, show_progress=True,
+                     background=bg_img)
         ok(f"QC → {qc_dir}" + (f" (overlay {res['overlay_frames']} frames)"
                                if res.get("overlay_path") else " (overlay skipped)"))
 

@@ -76,13 +76,17 @@ def test_anytrack_run_dir_output_autonames(tmp_path, monkeypatch):
     _write_timing(video.with_suffix(".csv"), n=20)
 
     monkeypatch.setattr(run_mod, "load_config", _synthetic_cfg)
-    monkeypatch.setattr(run_mod, "ensure_rois",
-                        lambda v, cfg: (setattr(v, "rois", [CircleROI(name="r0", cx=40, cy=40, r=39)]), v)[1])
+    monkeypatch.setattr(run_mod, "ensure_rois", _fake_ensure)
 
     out_dir = tmp_path / "results"
     rc = run_mod.main(["--video", str(video), "--output", str(out_dir), "--no-fast"])
     assert rc == 0
     assert (out_dir / "myclip_tracks.parquet").exists()
+
+
+def _fake_ensure(v, cfg, background=None):
+    v.rois = [CircleROI(name="r0", cx=40, cy=40, r=39)]
+    return v
 
 
 def test_anytrack_run_writes_custom_output(tmp_path, monkeypatch):
@@ -93,10 +97,7 @@ def test_anytrack_run_writes_custom_output(tmp_path, monkeypatch):
 
     monkeypatch.setattr(run_mod, "load_config", _synthetic_cfg)
 
-    def fake_ensure(v, cfg):  # inject a known ROI; detection is covered elsewhere
-        v.rois = [CircleROI(name="r0", cx=40, cy=40, r=39)]
-        return v
-    monkeypatch.setattr(run_mod, "ensure_rois", fake_ensure)
+    monkeypatch.setattr(run_mod, "ensure_rois", _fake_ensure)
 
     out = tmp_path / "custom" / "result.parquet"
     rc = run_mod.main(["--video", str(video), "--output", str(out), "--no-fast"])
@@ -116,8 +117,7 @@ def test_anytrack_run_csv_output_and_missing_timing(tmp_path, monkeypatch):
         pytest.skip("No MJPG encoder available")
 
     monkeypatch.setattr(run_mod, "load_config", _synthetic_cfg)
-    monkeypatch.setattr(run_mod, "ensure_rois",
-                        lambda v, cfg: (setattr(v, "rois", [CircleROI(name="r0", cx=40, cy=40, r=39)]), v)[1])
+    monkeypatch.setattr(run_mod, "ensure_rois", _fake_ensure)
 
     # No timing CSV next to the video -> argparse error (SystemExit).
     with pytest.raises(SystemExit):

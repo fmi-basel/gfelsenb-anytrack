@@ -32,6 +32,24 @@ from .writer import write_diagnostics
 # Per-frame boolean failure-flag columns produced by :func:`compute_flags`.
 FLAG_COLUMNS = ["flag_area", "flag_jump", "flag_crop_oob", "flag_multi"]
 
+# Visually distinct BGR colors cycled per ROI (shared by overlay + plots).
+_ROI_PALETTE_BGR = [
+    (244, 133, 66), (83, 168, 52), (7, 193, 255), (53, 67, 234),
+    (188, 71, 171), (193, 172, 0), (67, 112, 255), (36, 157, 158),
+]
+
+
+def roi_color_map(names) -> Dict[str, tuple]:
+    """Map each ROI name to a stable BGR color (sorted for determinism)."""
+    uniq = sorted({str(n) for n in names})
+    return {n: _ROI_PALETTE_BGR[i % len(_ROI_PALETTE_BGR)] for i, n in enumerate(uniq)}
+
+
+def _bgr_to_mpl(bgr: tuple) -> tuple:
+    """Convert a 0-255 BGR tuple to a matplotlib 0-1 RGB tuple."""
+    b, g, r = bgr
+    return (r / 255.0, g / 255.0, b / 255.0)
+
 
 def _read_tracks(path: Path) -> pd.DataFrame:
     """Read a finished session's tracks table (parquet or CSV)."""
@@ -200,6 +218,95 @@ def plot_diagnostics(df: pd.DataFrame, video, cfg, out_dir: Path) -> List[Path]:
     return [path]
 
 
+def plot_timeseries(df: pd.DataFrame, cfg, out_dir: Path) -> List[Path]:
+    """Per-ROI timeseries of detection size/count and ellipse properties.
+
+    One stacked panel per available metric (area, candidate count, ellipse
+    major/minor/angle), lines colored per ROI (same palette as the overlay).
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    out_dir = Path(out_dir)
+    if df.empty:
+        return []
+
+    metrics = [
+        ("area", "contour/ellipse\narea (px)"),
+        ("n_candidates", "candidates\nper frame"),
+        ("major", "ellipse\nmajor (px)"),
+        ("minor", "ellipse\nminor (px)"),
+        ("angle_deg", "ellipse\nangle (deg)"),
+    ]
+    present = [(c, lbl) for c, lbl in metrics if c in df.columns]
+    if not present:
+        return []
+
+    colors = roi_color_map(df["roi"].unique())
+    x = "t_s" if "t_s" in df.columns else "frame"
+    fig, axes = plt.subplots(len(present), 1, figsize=(14, 2.2 * len(present)),
+                             sharex=True, squeeze=False)
+    for ax, (col, lbl) in zip(axes[:, 0], present):
+        for roi, g in df.groupby("roi"):
+            gg = g.sort_values(x)
+            ax.plot(gg[x], gg[col], lw=0.6, label=str(roi),
+                    color=_bgr_to_mpl(colors[str(roi)]))
+        ax.set_ylabel(lbl, fontsize=8)
+        ax.grid(alpha=0.25)
+    axes[0, 0].legend(fontsize=7, ncol=min(4, max(1, df["roi"].nunique())), loc="upper right")
+    axes[-1, 0].set_xlabel(x)
+    fig.suptitle("Per-ROI timeseries")
+    fig.tight_layout()
+    path = out_dir / "qc_timeseries.png"
+    fig.savefig(path, dpi=110)
+    plt.close(fig)
+    return [path]
+
+
+def plot_coverage(df: pd.DataFrame, video, out_dir: Path) -> List[Path]:
+    """Per-ROI tracked-vs-missing timeline (raster) — highlights dropouts.
+
+    Rows are ROIs; the horizontal axis is frame index; shading is the fraction
+    of frames tracked in each time bin (dark = tracked, white = missing).
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    out_dir = Path(out_dir)
+    if df.empty:
+        return []
+
+    n_total = int(getattr(video, "frame_count", 0) or 0) or (int(df["frame"].max()) + 1)
+    if n_total <= 0:
+        return []
+    rois = sorted(df["roi"].astype(str).unique())
+    n_bins = int(min(n_total, 2000))
+    edges = np.linspace(0, n_total, n_bins + 1)
+    binw = np.maximum(np.diff(edges), 1e-9)
+
+    mat = np.zeros((len(rois), n_bins), dtype=float)
+    for i, roi in enumerate(rois):
+        frames = df.loc[df["roi"].astype(str) == roi, "frame"].astype(int).to_numpy()
+        frames = frames[(frames >= 0) & (frames < n_total)]
+        counts, _ = np.histogram(frames, bins=edges)
+        mat[i] = np.clip(counts / binw, 0.0, 1.0)
+
+    fig, ax = plt.subplots(figsize=(14, 0.5 * len(rois) + 1.6))
+    ax.imshow(mat, aspect="auto", cmap="Greens", vmin=0.0, vmax=1.0,
+              extent=[0, n_total, len(rois) - 0.5, -0.5], interpolation="nearest")
+    ax.set_yticks(range(len(rois)))
+    ax.set_yticklabels(rois)
+    ax.set_xlabel("frame")
+    ax.set_title(f"Tracked-frame coverage (white = missing detections; {n_total} frames)")
+    fig.tight_layout()
+    path = out_dir / "qc_coverage.png"
+    fig.savefig(path, dpi=110)
+    plt.close(fig)
+    return [path]
+
+
 def render_overlay(
     video,
     df: pd.DataFrame,
@@ -239,6 +346,11 @@ def render_overlay(
         return None, 0
 
     rois = list(getattr(video, "rois", []) or [])
+    # One stable color per ROI, shared with the timeseries plots. Cover both the
+    # detected ROIs and any roi names present only in the dataframe.
+    names = [r.name for r in rois] + [str(n) for n in flagged.get("roi", pd.Series(dtype=str)).unique()]
+    colors = roi_color_map(names)
+
     pbar = None
     if show_progress:
         try:
@@ -259,22 +371,32 @@ def render_overlay(
         if frame.ndim == 2:
             frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
 
+        # ROI arenas: filled label + circle in the ROI's own color.
         for roi in rois:
-            cv2.circle(frame, (int(roi.cx), int(roi.cy)), int(roi.r), (90, 90, 90), 1)
+            col = colors.get(str(roi.name), (90, 90, 90))
+            c = (int(roi.cx), int(roi.cy))
+            cv2.circle(frame, c, int(roi.r), col, 2)
+            cv2.putText(frame, str(roi.name), (int(roi.cx - roi.r), int(roi.cy - roi.r) - 6),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, col, 2, cv2.LINE_AA)
 
-        for (fr, xs, ys) in trails.values():
+        # Fading trails, colored per ROI.
+        for (roi_name, _tid), (fr, xs, ys) in trails.items():
+            col = colors.get(str(roi_name), (0, 180, 180))
             lo = int(np.searchsorted(fr, fidx - trail_len))
             hi = int(np.searchsorted(fr, fidx, side="right"))
             if hi - lo >= 2:
                 pts = np.stack([xs[lo:hi], ys[lo:hi]], axis=1).astype(np.int32)
-                cv2.polylines(frame, [pts], False, (0, 180, 180), 1)
+                cv2.polylines(frame, [pts], False, col, 1)
 
+        # Centroids: ROI-colored dot; a red ring marks a flagged frame.
         rows = frame_groups.get(fidx)
         if rows is not None:
             for _, r in rows.iterrows():
-                flagged_here = any(bool(r.get(c, False)) for c in FLAG_COLUMNS)
-                color = (0, 0, 255) if flagged_here else (0, 255, 0)
-                cv2.circle(frame, (int(r["x"]), int(r["y"])), 4, color, -1)
+                col = colors.get(str(r["roi"]), (0, 255, 0))
+                cx, cy = int(r["x"]), int(r["y"])
+                cv2.circle(frame, (cx, cy), 4, col, -1)
+                if any(bool(r.get(c, False)) for c in FLAG_COLUMNS):
+                    cv2.circle(frame, (cx, cy), 8, (0, 0, 255), 2)
 
         cv2.putText(frame, f"frame {fidx}", (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
@@ -301,10 +423,32 @@ def run_qc(
     overlay: bool = True,
     max_frames: int = 0,
     show_progress: bool = False,
+    background=None,
+    save_background: bool = True,
 ) -> Dict[str, Any]:
-    """Produce all QC artifacts into ``out_dir`` and return a manifest dict."""
+    """Produce all QC artifacts into ``out_dir`` and return a manifest dict.
+
+    Writes the model background (``qc_background.png``), a distributions figure,
+    per-ROI timeseries, a coverage raster, per-frame failure flags, a JSON
+    summary and (optionally) an annotated overlay video. A prebuilt
+    ``background`` image is reused; otherwise it is built from the video when
+    ``save_background`` is set.
+    """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Background PNG (the clean-plate reference the tracker subtracts against).
+    background_path: Optional[Path] = None
+    bg = background
+    if bg is None and save_background:
+        try:
+            from .background import build_background_image
+            bg = build_background_image(video.video_path, cfg)
+        except Exception:
+            bg = None
+    if bg is not None:
+        background_path = out_dir / "qc_background.png"
+        cv2.imwrite(str(background_path), bg)
 
     flagged = compute_flags(df, video, cfg)
     flags_path = out_dir / "qc_flags.parquet"
@@ -314,7 +458,11 @@ def run_qc(
     summary_path = out_dir / "qc_summary.json"
     summary_path.write_text(json.dumps(summary, indent=2))
 
-    plots = plot_diagnostics(df, video, cfg, out_dir)
+    plots = (
+        plot_diagnostics(df, video, cfg, out_dir)
+        + plot_timeseries(df, cfg, out_dir)
+        + plot_coverage(df, video, out_dir)
+    )
 
     overlay_path: Optional[Path] = None
     n_overlay = 0
@@ -328,6 +476,7 @@ def run_qc(
         "summary": summary,
         "summary_path": summary_path,
         "flags_path": flags_path,
+        "background_path": background_path,
         "plots": plots,
         "overlay_path": overlay_path,
         "overlay_frames": n_overlay,

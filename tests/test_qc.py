@@ -14,6 +14,9 @@ from anytrack.qc import (
     missing_report,
     summarize,
     run_qc,
+    plot_timeseries,
+    plot_coverage,
+    roi_color_map,
     main as qc_main,
     FLAG_COLUMNS,
 )
@@ -128,10 +131,42 @@ def test_run_qc_writes_artifacts(tmp_path):
     assert (out_dir / "qc_summary.json").exists()
     assert (out_dir / "qc_flags.parquet").exists()
     assert (out_dir / "qc_diagnostics.png").exists()
+    assert (out_dir / "qc_timeseries.png").exists()
+    assert (out_dir / "qc_coverage.png").exists()
+    # background PNG is built from the video and saved
+    assert res["background_path"] is not None and res["background_path"].exists()
     # overlay is best-effort (depends on an mp4 encoder being present)
     if res["overlay_path"] is not None:
         assert res["overlay_path"].exists()
         assert 0 < res["overlay_frames"] <= 5
+
+
+def test_plot_timeseries_all_ellipse_props(tmp_path):
+    n = 12
+    df = pd.DataFrame({
+        "roi": ["r0"] * n + ["r1"] * n,
+        "track_id": [0] * (2 * n),
+        "frame": list(range(n)) * 2,
+        "area": np.linspace(40, 60, 2 * n),
+        "n_candidates": [1] * (2 * n),
+        "major": np.linspace(10, 14, 2 * n),
+        "minor": np.linspace(4, 6, 2 * n),
+        "angle_deg": np.linspace(0, 180, 2 * n),
+    })
+    cfg = AnyTrackConfig()
+    paths = plot_timeseries(df, cfg, tmp_path)
+    assert paths and paths[0].exists()
+    # coverage raster too
+    cpaths = plot_coverage(df, _video(n=n), tmp_path)
+    assert cpaths and cpaths[0].exists()
+
+
+def test_roi_color_map_stable():
+    m = roi_color_map(["b", "a", "a"])
+    assert set(m) == {"a", "b"}
+    assert m["a"] != m["b"]
+    # deterministic (sorted): "a" gets palette[0]
+    assert roi_color_map(["a", "b"]) == roi_color_map(["b", "a"])
 
 
 def test_qc_cli(tmp_path):

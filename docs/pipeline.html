@@ -199,7 +199,7 @@ const PIPELINE = [
   {name:"Output (tracks / pose / diagnostics)", mod:"writer.py", status:"done",
    desc:"Parquet-default (CSV kept) writer + streaming TrackWriter implemented. Pose/diagnostics schemas + session auto-save wiring land with A7/B."},
   {name:"QC overlays & diagnostics", mod:"qc.py", status:"done",
-   desc:"Post-hoc QC (A9): overlay video (ROI/centroid/trail/status color), 2x3 diagnostics figure, per-frame failure flags + JSON summary, anytrack-qc CLI. Tier-2 columns n_candidates/contrast now populated by both trackers (cheap centroid sampling); bg-drift-over-time waits on A4."},
+   desc:"Post-hoc QC (A9): background PNG (clean plate), ROI-colored overlay video (arena circles+labels, per-ROI centroids/trails, red flag ring), 2x3 distributions figure, per-ROI timeseries (area/candidates/major/minor/angle), tracked-frame coverage raster, per-frame failure flags + JSON summary, anytrack-qc CLI. Tier-2 n_candidates/contrast populated by both trackers; bg-drift-over-time waits on A4."},
 ];
 
 const MODULES = [
@@ -219,7 +219,7 @@ const MODULES = [
   {mod:"run.py",           resp:"Headless full-pipeline CLI: anytrack-run (ROI detect → track → write to --output; --qc/--crops chaining). tqdm progress bars + formatted phase output via cli_progress.py (NEW).", status:"done"},
   {mod:"gui/app.py",       resp:"Debug window now renders from detector.debug_frame (A7). Pose overlay (B); optional in-GUI crop-export menu deferred (CLI exists).", status:"partial"},
   {mod:"sleap_inference.py", resp:"Pose engine — not yet created (B).", status:"planned"},
-  {mod:"qc.py",            resp:"Overlay video + diagnostics figure + failure flags/summary + anytrack-qc CLI (NEW).", status:"done"},
+  {mod:"qc.py",            resp:"Background PNG + ROI-colored overlay + distributions/timeseries/coverage figures + failure flags/summary + anytrack-qc CLI (NEW).", status:"done"},
 ];
 
 const MILESTONE_A = [

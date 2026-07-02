@@ -19,29 +19,21 @@ from .models import VideoAsset
 from .config import AnyTrackConfig, load_config
 from .io import load_video_asset
 from .roi import detect_circular_rois
-from .background import build_background
+from .background import build_background, build_background_image
 from .tracking import track_video
 from .tracking_fast import track_video_fast
 
 
-def ensure_rois(video: VideoAsset, cfg: AnyTrackConfig) -> VideoAsset:
+def ensure_rois(video: VideoAsset, cfg: AnyTrackConfig, background=None) -> VideoAsset:
     """Detect circular ROIs on ``video`` in place if none are defined.
 
-    Uses the current GMM background API + Hough ROI detection.
+    Uses the current GMM background API + Hough ROI detection. A prebuilt
+    ``background`` image may be passed to avoid rebuilding it (e.g. when the
+    caller also needs it for QC).
     """
     if video.rois:
         return video
-    bg = build_background(
-        str(video.video_path),
-        n_samples=cfg.gmm_n_samples,
-        bic_improvement=cfg.gmm_bic_improvement,
-        min_std=cfg.gmm_min_std,
-        reg_covar=cfg.gmm_reg_covar,
-        lowp=cfg.gmm_lowp,
-        arena_detection=cfg.arena_detection_enabled,
-        arena_min_area_frac=cfg.arena_min_area_frac,
-        arena_blur_sigma=cfg.arena_blur_sigma,
-    ).image
+    bg = background if background is not None else build_background_image(video.video_path, cfg)
     video.rois = detect_circular_rois(
         bg,
         dp=cfg.roi_hough_dp,
