@@ -207,6 +207,27 @@ def test_legacy_track_video_runs_and_populates_cv_angle(tmp_path):
     assert df["x"].max() - df["x"].min() > 10  # captured the rightward motion
 
 
+def test_legacy_track_video_with_drift_correction(tmp_path):
+    """The opt-in bg_drift_correction path runs end-to-end and still tracks."""
+    video_path = tmp_path / "synthetic.avi"
+    if not _write_synthetic_video(video_path):
+        pytest.skip("No MJPG encoder available in this OpenCV build")
+    n = 30
+    timing = pd.DataFrame({"frame": np.arange(n), "t_s": np.arange(n) / 30.0})
+    video = VideoAsset(
+        video_path=video_path,
+        timing_csv_path=video_path.with_suffix(".csv"),
+        timing=timing,
+        rois=[CircleROI(name="roi0", cx=40, cy=40, r=39)],
+    )
+    cfg = _det_cfg(bg_drift_correction=True, bg_asym_update=True)
+    df = track_video(video, cfg).to_dataframe()
+    assert not df.empty
+    assert len(df) >= n // 2
+    assert df["y"].between(30, 50).mean() > 0.8
+    assert df["x"].max() - df["x"].min() > 10
+
+
 def test_tracker_reacquires_after_jump_away_from_center():
     """A fly that loses lock while living away from the ROI center must be
     re-acquired on its actual candidate, not stall at the (wrong) ROI center.

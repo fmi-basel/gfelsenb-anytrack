@@ -623,6 +623,78 @@ def build_background(
     )
 
 
+class BackgroundState:
+    """Mutable working background with illumination-drift correction + protection.
+
+    Opt-in (``cfg.bg_drift_correction``). Each frame it estimates a global
+    brightness drift from *safe* pixels — inside the arena but outside a
+    protected region around the tracked object (and, optionally, the previous
+    foreground) — and returns a drift-corrected background for subtraction, so a
+    slow lighting change doesn't flood the frame with false foreground. An
+    optional slow **asymmetric** per-pixel update adapts the base plate on safe
+    pixels (step_up for brightening ≫ step_down, to avoid eating dark objects).
+
+    Coordinate-agnostic like the tracker: pass ``protect_radius`` and centers in
+    the same frame as the images (scaled-local for the fast path). Build it
+    inside the worker (it holds numpy arrays, not picklable state).
+    """
+
+    def __init__(self, bg: np.ndarray, cfg, protect_radius: float, use_arena_mask: bool = True):
+        self.bg = bg.astype(np.float32)
+        self.protect_radius = float(protect_radius)
+        self.fg_dilate = int(getattr(cfg, "bg_fg_dilate_px", 7))
+        self.asym = bool(getattr(cfg, "bg_asym_update", False))
+        self.step_up = float(getattr(cfg, "bg_step_up", 1.0))
+        self.step_down = float(getattr(cfg, "bg_step_down", 0.02))
+        h, w = self.bg.shape[:2]
+        if use_arena_mask:
+            self.arena = np.zeros((h, w), np.uint8)
+            cv2.circle(self.arena, (w // 2, h // 2), min(h, w) // 2, 255, -1)
+        else:
+            self.arena = None
+        self.prev_fg: Optional[np.ndarray] = None
+        self._dk = (cv2.getStructuringElement(cv2.MORPH_ELLIPSE,
+                                              (2 * self.fg_dilate + 1, 2 * self.fg_dilate + 1))
+                    if self.fg_dilate > 0 else None)
+
+    def _safe_mask(self, shape, center) -> np.ndarray:
+        protected = np.zeros(shape[:2], np.uint8)
+        if center is not None and self.protect_radius > 0:
+            cv2.circle(protected, (int(round(center[0])), int(round(center[1]))),
+                       int(round(self.protect_radius)), 255, -1)
+        if self.prev_fg is not None:
+            fg = cv2.dilate(self.prev_fg, self._dk) if self._dk is not None else self.prev_fg
+            protected = cv2.bitwise_or(protected, fg)
+        safe = cv2.bitwise_not(protected)
+        if self.arena is not None:
+            safe = cv2.bitwise_and(safe, self.arena)
+        return safe > 0
+
+    def corrected(self, gray: np.ndarray, center=None) -> np.ndarray:
+        """Return the drift-corrected background (uint8) for this frame."""
+        m = self._safe_mask(gray.shape, center)
+        g = gray.astype(np.float32)
+        if m.any():
+            drift = float(np.median(g[m] - self.bg[m]))
+            if self.asym:
+                delta = g - self.bg
+                step = np.where(delta >= 0.0, self.step_up, self.step_down)
+                updated = self.bg + step * delta
+                self.bg = np.where(m, updated, self.bg)
+        else:
+            drift = 0.0
+        return np.clip(self.bg + drift, 0.0, 255.0).astype(np.uint8)
+
+    def note_foreground(self, contour, shape) -> None:
+        """Record the accepted object's contour to protect it next frame."""
+        if contour is None:
+            self.prev_fg = None
+            return
+        m = np.zeros(shape[:2], np.uint8)
+        cv2.drawContours(m, [contour], -1, 255, -1)
+        self.prev_fg = m
+
+
 def build_background_image(video_path, cfg) -> np.ndarray:
     """Build the model background image using the config's GMM/arena params.
 

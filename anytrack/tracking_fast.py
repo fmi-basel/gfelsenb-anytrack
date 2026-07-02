@@ -16,7 +16,7 @@ import cv2
 import pandas as pd
 
 from .models import CircleROI, FlyTrack, EllipseObservation, TrackingResult, VideoAsset
-from .background import build_background
+from .background import build_background, BackgroundState
 from .config import AnyTrackConfig
 from .preprocess import PreprocessResult
 from .detector import extract_ellipses, build_morph_kernels, centroid_contrast
@@ -92,6 +92,11 @@ def track_roi_video(
         use_kalman=cfg.use_kalman,
     )
 
+    # Opt-in illumination-drift correction (built per worker; not picklable).
+    bg_state = None
+    if getattr(cfg, "bg_drift_correction", False):
+        bg_state = BackgroundState(bg, cfg, protect_radius=cfg.bg_protect_radius_px / scale)
+
     # Extract timing as arrays
     frame_indices = timing["frame"].values.astype(np.int32)
     t_s_values = timing["t_s"].values.astype(np.float64)
@@ -109,13 +114,18 @@ def track_roi_video(
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
+        # Drift-correct the background against the tracked object's last position
+        # (opt-in); otherwise use the static background.
+        bg_use = bg if bg_state is None else bg_state.corrected(gray, center=tracker.last)
         candidates = extract_ellipses(
-            gray, bg, cfg,
+            gray, bg_use, cfg,
             kernel_open=kernel_open,
             kernel_close=kernel_close,
         )
 
         chosen, x_f, y_f = tracker.step(candidates)
+        if bg_state is not None:
+            bg_state.note_foreground(chosen.contour if chosen is not None else None, gray.shape)
         if chosen is None:
             continue
 

@@ -13,7 +13,7 @@ import numpy as np
 import cv2
 
 from .models import VideoAsset, FlyTrack, EllipseObservation, TrackingResult
-from .background import build_background
+from .background import build_background, BackgroundState
 from .roi import roi_mask
 from .config import AnyTrackConfig
 from .detector import (
@@ -97,6 +97,8 @@ def track_video(
             "x0": x0, "y0": y0, "x1": x1, "y1": y1,
             "bg_roi": bg_roi,
             "mask": mask,
+            "bg_state": (BackgroundState(bg_roi, cfg, protect_radius=cfg.bg_protect_radius_px)
+                         if getattr(cfg, "bg_drift_correction", False) else None),
         }
 
     # Extract timing data as numpy arrays (avoid iterrows overhead)
@@ -131,9 +133,19 @@ def track_video(
             roi_gray = gray[pre["y0"]:pre["y1"], pre["x0"]:pre["x1"]]
             bg_roi = pre["bg_roi"]
             mask = pre["mask"]
+            bg_state = pre["bg_state"]
+
+            # Opt-in drift correction, anchored at the tracker's last position
+            # (full-frame) mapped into ROI-local coordinates.
+            if bg_state is not None:
+                tr = trackers[roi.name]
+                ctr = (tr.last[0] - x0, tr.last[1] - y0)
+                bg_use = bg_state.corrected(roi_gray, center=ctr)
+            else:
+                bg_use = bg_roi
 
             cand = extract_ellipses(
-                roi_gray, bg_roi, cfg,
+                roi_gray, bg_use, cfg,
                 mask=mask,
                 kernel_open=kernel_open,
                 kernel_close=kernel_close,
@@ -157,6 +169,9 @@ def track_video(
             ]
 
             chosen, x_f, y_f = trackers[roi.name].step(cand_global)
+            if bg_state is not None:
+                bg_state.note_foreground(
+                    chosen.contour if chosen is not None else None, roi_gray.shape)
             if chosen is None:
                 continue
 
