@@ -6,6 +6,8 @@ import cv2
 import pandas as pd
 import pytest
 
+from types import SimpleNamespace
+
 from anytrack.config import AnyTrackConfig
 from anytrack.models import CircleROI
 import anytrack.run as run_mod
@@ -48,6 +50,39 @@ def _synthetic_cfg():
         miss_tolerance=15,
         use_kalman=True,
     )
+
+
+def test_resolve_output_path(tmp_path):
+    cfg = AnyTrackConfig()
+    video = SimpleNamespace(video_path=tmp_path / "myclip.avi")
+
+    # A directory (no file extension) -> auto-named <stem>_tracks.parquet inside it.
+    d = tmp_path / "results"
+    assert run_mod._resolve_output_path(d, cfg, video) == d / "myclip_tracks.parquet"
+    # Trailing-separator directory behaves the same.
+    d2 = tmp_path / "out"
+    assert run_mod._resolve_output_path(str(d2) + "/", cfg, video) == d2 / "myclip_tracks.parquet"
+    # A file path with a recognized suffix is used verbatim.
+    f = tmp_path / "custom.parquet"
+    assert run_mod._resolve_output_path(f, cfg, video) == f
+    fc = tmp_path / "sub" / "custom.csv"
+    assert run_mod._resolve_output_path(fc, cfg, video) == fc
+
+
+def test_anytrack_run_dir_output_autonames(tmp_path, monkeypatch):
+    video = tmp_path / "myclip.avi"
+    if not _write_video(video):
+        pytest.skip("No MJPG encoder available")
+    _write_timing(video.with_suffix(".csv"), n=20)
+
+    monkeypatch.setattr(run_mod, "load_config", _synthetic_cfg)
+    monkeypatch.setattr(run_mod, "ensure_rois",
+                        lambda v, cfg: (setattr(v, "rois", [CircleROI(name="r0", cx=40, cy=40, r=39)]), v)[1])
+
+    out_dir = tmp_path / "results"
+    rc = run_mod.main(["--video", str(video), "--output", str(out_dir), "--no-fast"])
+    assert rc == 0
+    assert (out_dir / "myclip_tracks.parquet").exists()
 
 
 def test_anytrack_run_writes_custom_output(tmp_path, monkeypatch):

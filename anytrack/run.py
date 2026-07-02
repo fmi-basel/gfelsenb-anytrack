@@ -21,6 +21,27 @@ from .benchmark import ensure_rois
 from .cli_progress import TqdmProgress, header, step, ok, info
 
 
+# File suffixes that mean "--output is a file path"; anything else is a directory.
+_TRACK_SUFFIXES = {".parquet", ".pq", ".csv"}
+
+
+def _resolve_output_path(output, cfg, video):
+    """Resolve the tracks output path.
+
+    - ``None`` → the config default (``default_output_path``).
+    - a path with a ``.parquet``/``.pq``/``.csv`` suffix → used verbatim (file).
+    - anything else (a directory, e.g. ``out/`` or ``~/results``) → auto-named
+      ``<input_stem>_tracks.parquet`` inside that directory.
+    """
+    if output is None:
+        return default_output_path(cfg, video, kind="tracks")
+    out = Path(output)
+    if out.suffix.lower() in _TRACK_SUFFIXES:
+        return out
+    stem = Path(video.video_path).stem
+    return out / f"{stem}_tracks.parquet"
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     import argparse
 
@@ -32,7 +53,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--timing", type=Path, default=None,
                     help="Per-frame timing CSV (default: <video>.csv).")
     ap.add_argument("--output", "-o", type=Path, default=None,
-                    help="Output tracks path (.parquet or .csv). "
+                    help="Output tracks path. A .parquet/.csv file is used as-is; "
+                         "a directory (no file extension) auto-names it "
+                         "<input_stem>_tracks.parquet inside it. "
                          "Default: <cfg.output_dir or video dir>/<stem>_tracks.<fmt>.")
 
     mode = ap.add_mutually_exclusive_group()
@@ -86,7 +109,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     progress.close()
     dt = time.perf_counter() - t0
 
-    out = Path(args.output) if args.output else default_output_path(cfg, video, kind="tracks")
+    out = _resolve_output_path(args.output, cfg, video)
     fmt = "csv" if out.suffix.lower() == ".csv" else None
     write_tracks(df, out, fmt=fmt)
     rows_s = (len(df) / dt) if dt > 0 else 0.0
