@@ -22,19 +22,6 @@ class BackgroundModel:
 
 
 # Debug utilities
-def _resize_max_side(gray: np.ndarray, max_side: int) -> np.ndarray:
-    if max_side is None or max_side <= 0:
-        return gray
-    h, w = gray.shape[:2]
-    m = max(h, w)
-    if m <= max_side:
-        return gray
-    s = max_side / float(m)
-    nh = max(1, int(round(h * s)))
-    nw = max(1, int(round(w * s)))
-    return cv2.resize(gray, (nw, nh), interpolation=cv2.INTER_AREA)
-
-
 def _emit_debug(
     debug_hook: Optional[Callable[[str, Dict[str, Any]], None]],
     event: str,
@@ -55,26 +42,6 @@ def _read_gray(cap: cv2.VideoCapture, idx: int) -> Optional[np.ndarray]:
         return None
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     return gray
-
-
-def _read_gray_small(cap: cv2.VideoCapture, idx: int, max_side: int = 96) -> Optional[np.ndarray]:
-    """Read frame idx, convert to grayscale, and downsample so max(h,w)==max_side."""
-    g = _read_gray(cap, idx)
-    if g is None:
-        return None
-    h, w = g.shape[:2]
-    m = max(h, w)
-    if m <= max_side:
-        return g
-    scale = max_side / float(m)
-    nh = max(1, int(round(h * scale)))
-    nw = max(1, int(round(w * scale)))
-    return cv2.resize(g, (nw, nh), interpolation=cv2.INTER_AREA)
-
-def _sample_indices(n_frames: int, k: int) -> np.ndarray:
-    if k <= 1:
-        return np.array([0], dtype=int)
-    return np.linspace(0, max(0, n_frames - 1), k).astype(int)
 
 
 # ============================================================================
@@ -471,86 +438,6 @@ def blur_arenas(
     out = bg_uint8.copy()
     out[mask] = blurred[mask]
     return out
-
-
-def _pca2(x: np.ndarray) -> np.ndarray:
-    """Project rows of x to 2D using PCA via SVD. Returns (n,2)."""
-    # x: (n, d)
-    x = x.astype(np.float32, copy=False)
-    x = x - x.mean(axis=0, keepdims=True)
-    # SVD on the (n,d) matrix; take first 2 right-singular vectors
-    # For small n, full_matrices=False is efficient.
-    _, _, vt = np.linalg.svd(x, full_matrices=False)
-    pcs = vt[:2].T  # (d,2)
-    return x @ pcs
-
-
-def _kmeans_pp_init(x2: np.ndarray, k: int, rng: np.random.Generator) -> np.ndarray:
-    """k-means++ initialization. Returns centers (k,2)."""
-    n = x2.shape[0]
-    centers = np.empty((k, 2), dtype=np.float32)
-    # first center
-    centers[0] = x2[rng.integers(0, n)]
-    # distances to nearest center
-    d2 = np.sum((x2 - centers[0]) ** 2, axis=1)
-    for i in range(1, k):
-        # choose next center proportional to distance^2
-        total = float(d2.sum())
-        if total <= 1e-12:
-            centers[i] = x2[rng.integers(0, n)]
-            continue
-        probs = d2 / total
-        idx = int(rng.choice(n, p=probs))
-        centers[i] = x2[idx]
-        d2 = np.minimum(d2, np.sum((x2 - centers[i]) ** 2, axis=1))
-    return centers
-
-
-def _kmeans2d(
-    x2: np.ndarray,
-    k: int,
-    iters: int = 50,
-    restarts: int = 2,
-    seed: int = 0,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Run k-means in 2D. Returns (centers, labels)."""
-    x2 = x2.astype(np.float32, copy=False)
-    n = x2.shape[0]
-    k = int(max(1, min(k, n)))
-    best_inertia = float("inf")
-    best_centers = None
-    best_labels = None
-
-    base_rng = np.random.default_rng(seed)
-    for _ in range(max(1, restarts)):
-        rng = np.random.default_rng(int(base_rng.integers(0, 2**31 - 1)))
-        centers = _kmeans_pp_init(x2, k, rng)
-
-        labels = np.zeros((n,), dtype=np.int32)
-        for _it in range(max(1, iters)):
-            # assign
-            dists = ((x2[:, None, :] - centers[None, :, :]) ** 2).sum(axis=2)  # (n,k)
-            new_labels = dists.argmin(axis=1).astype(np.int32)
-            if np.array_equal(new_labels, labels) and _it > 0:
-                break
-            labels = new_labels
-
-            # update
-            for j in range(k):
-                m = labels == j
-                if not np.any(m):
-                    # re-seed empty cluster
-                    centers[j] = x2[rng.integers(0, n)]
-                else:
-                    centers[j] = x2[m].mean(axis=0)
-
-        inertia = float(((x2 - centers[labels]) ** 2).sum())
-        if inertia < best_inertia:
-            best_inertia = inertia
-            best_centers = centers.copy()
-            best_labels = labels.copy()
-
-    return best_centers, best_labels
 
 
 def build_background(
