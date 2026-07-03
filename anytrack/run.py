@@ -269,19 +269,60 @@ def main(argv: Optional[List[str]] = None) -> int:
         ap.error(f"no videos to process for {args.video}")
 
     n = len(videos)
-    if n > 1:
-        batch_banner(n, "fast" if cfg.fast_mode else "legacy")
     t_all = time.perf_counter()
-    results = [_run_one(v, i, n, args=args, cfg=cfg, single=single)
-               for i, v in enumerate(videos, 1)]
-    dt_all = time.perf_counter() - t_all
-    n_ok = sum(1 for r in results if r is not None)
     if n > 1:
+        results = _run_batch(videos, args=args, cfg=cfg, single=single)
+        dt_all = time.perf_counter() - t_all
+        n_ok = sum(1 for r in results if r is not None)
         total_rows = sum(r for r in results if r is not None)
         batch_summary(n_ok, n, total_rows, dt_all)
     else:
+        results = [_run_one(videos[0], 1, 1, args=args, cfg=cfg, single=single)]
+        n_ok = sum(1 for r in results if r is not None)
         header("done")
     return 0 if n_ok else 1
+
+
+def _batch_concurrency(cfg, n_videos: int) -> int:
+    """Pick how many videos to process at once: ``cfg.batch_concurrency`` if set,
+    else ``cores // n_tracking_workers`` clamped to ``[1, n_videos]``. Each video
+    still uses its own worker pool, so K × per-video-workers ≈ cores."""
+    import multiprocessing as mp
+    if cfg.batch_concurrency and cfg.batch_concurrency > 0:
+        return max(1, min(cfg.batch_concurrency, n_videos))
+    cores = cfg.batch_core_budget or mp.cpu_count()
+    per_video = max(1, int(getattr(cfg, "n_tracking_workers", 4) or 4))
+    return max(1, min(cores // per_video, n_videos))
+
+
+def _run_batch(videos, *, args, cfg, single):
+    """Process a batch, up to K videos concurrently, with a multi-line live UI.
+
+    Threads at the outer level are correct: each ``_run_one`` drives its own
+    FFmpeg decode + multiprocessing tracking pool, so the outer thread is mostly
+    waiting on subprocesses. Results are index-keyed to stay deterministic.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    from .cli_progress import BatchProgressGroup
+
+    n = len(videos)
+    k = _batch_concurrency(cfg, n)
+    batch_banner(n, ("fast" if cfg.fast_mode else "legacy") + f" · {k}× concurrent")
+    group = BatchProgressGroup(n)
+    results = [None] * n
+    try:
+        with ThreadPoolExecutor(max_workers=k) as ex:
+            futs = {ex.submit(_run_one, v, i + 1, n, args=args, cfg=cfg,
+                              single=single, group=group): i
+                    for i, v in enumerate(videos)}
+            for fut, i in futs.items():
+                try:
+                    results[i] = fut.result()
+                except Exception:  # a failed video shouldn't sink the batch
+                    results[i] = None
+    finally:
+        group.close()
+    return results
 
 
 if __name__ == "__main__":

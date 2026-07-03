@@ -210,17 +210,13 @@ def batch_summary(n_ok: int, n_total: int, total_rows: int, dt: float) -> None:
     print(_RULE)
 
 
-class BatchProgress:
-    """Animated, compact one-line-per-video progress for ``--video DIR`` runs.
+class _LiveLine:
+    """Per-video progress state + event handling, with no rendering of its own.
 
-    Doubles as a ``progress_hook``: pipeline events set the current stage, and a
-    daemon thread repaints the line ~10×/s so the spinner and elapsed clock keep
-    moving even through blocking, event-less stages (ROI detection). Each stage
-    has its own color (ROI = yellow, preprocess = cyan, track = green, pose =
-    magenta, QC = blue) and tracking shows a live ROI progress bar. Call
-    :meth:`phase` for non-event stages and :meth:`finish` to replace the live
-    line with a persistent result. Off a TTY, the animation is skipped and only
-    the final result line is printed.
+    Shared by the single-line :class:`BatchProgress` and the multi-line
+    :class:`BatchProgressGroup` slots so both interpret pipeline events and format
+    a line identically. :meth:`render` returns the live content (spinner + index +
+    name + stage bar/label + clock); :meth:`result_line` the committed ✓/✗ result.
     """
 
     _NAME_W = 26
@@ -229,22 +225,86 @@ class BatchProgress:
         self.idx = idx
         self.total = total
         self.name = name
+        self.phase_key = "roi"
+        self.phase_text = "starting…"
+        self.fn = 0        # frames processed in the current stage
+        self.ftotal = 0    # frames expected (0 → no bar, show phase text)
+        self.t0 = _time.monotonic()
+
+    def _set_phase(self, key: str, text: str) -> None:
+        self.phase_key = key
+        self.phase_text = text
+        self.fn = self.ftotal = 0
+
+    def _apply(self, event: str, payload: dict) -> None:
+        """Update state from a pipeline event (no rendering)."""
+        if event == "frames":
+            stage = payload.get("stage")
+            if stage:
+                self.phase_key = stage
+            self.fn = int(payload.get("n", 0))
+            self.ftotal = int(payload.get("total", 0))
+        elif event == "status":
+            stage = payload.get("stage")
+            if stage == "preprocessing":
+                self._set_phase("preprocess", "preprocessing…")
+            elif stage == "tracking":
+                self._set_phase("track", "tracking…")
+        elif event == "started":     # legacy per-frame tracking
+            self._set_phase("track", "tracking…")
+        elif event == "tracking":
+            st = payload.get("status")
+            if st == "starting":
+                self._set_phase("track", "tracking…")
+            elif st == "complete" and self.ftotal:
+                self.fn = self.ftotal
+        elif event in ("pose", "pose_done"):
+            self._set_phase("pose", "pose…")
+
+    def render(self, spin_char: str) -> str:
+        color = _ANSI.get(self.phase_key, "")
+        name = self.name[:self._NAME_W].ljust(self._NAME_W)
+        if self.ftotal > 0:
+            frac = self.fn / self.ftotal
+            label = _STAGE_LABEL.get(self.phase_key, self.phase_key)
+            phase = f"{label:<10} {color}{_mini_bar(frac, 16)}{_RESET} {int(frac * 100):3d}%"
+        else:
+            phase = f"{color}{self.phase_text}{_RESET}"
+        clock = _fmt_clock(_time.monotonic() - self.t0)
+        return (f"{color}{spin_char}{_RESET} {_DIM}[{self.idx}/{self.total}]{_RESET} "
+                f"{name} {phase} {_DIM}{clock}{_RESET}")
+
+    def result_line(self, summary: str, ok: bool) -> str:
+        color = _ANSI["done"] if ok else _ANSI["error"]
+        mark = "✓" if ok else "✗"
+        name = self.name[:self._NAME_W].ljust(self._NAME_W)
+        return (f"{color}{mark}{_RESET} {_DIM}[{self.idx}/{self.total}]{_RESET} "
+                f"{name} {_DIM}{summary}{_RESET}")
+
+
+class BatchProgress(_LiveLine):
+    """Animated, compact one-line-per-video progress for a single in-flight video.
+
+    Doubles as a ``progress_hook``: pipeline events set the current stage, and a
+    daemon thread repaints the line ~10×/s so the spinner and elapsed clock keep
+    moving even through blocking, event-less stages (ROI detection). Each stage
+    has its own color and tracking shows a live frame bar. Off a TTY, the
+    animation is skipped and only the final result line is printed. For
+    *concurrent* videos use :class:`BatchProgressGroup` instead.
+    """
+
+    def __init__(self, idx: int, total: int, name: str):
+        super().__init__(idx, total, name)
         self._tty = bool(getattr(sys.stdout, "isatty", lambda: False)())
         self._lock = threading.Lock()
-        self._phase_key = "roi"
-        self._phase_text = "starting…"
-        self._fn = 0          # frames processed in the current stage
-        self._ftotal = 0      # frames expected (0 → no bar, show phase text)
         self._spin = 0
         self._finished = False
-        self._t0 = _time.monotonic()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         if self._tty:
             self._thread = threading.Thread(target=self._tick, daemon=True)
             self._thread.start()
 
-    # -- rendering -------------------------------------------------------
     def _tick(self) -> None:
         while not self._stop.wait(0.1):
             with self._lock:
@@ -255,73 +315,22 @@ class BatchProgress:
         """Repaint the live line (lock held, TTY only)."""
         if not self._tty or self._finished:
             return
-        color = _ANSI.get(self._phase_key, "")
-        name = self.name[:self._NAME_W].ljust(self._NAME_W)
-        if self._ftotal > 0:
-            frac = self._fn / self._ftotal
-            label = _STAGE_LABEL.get(self._phase_key, self._phase_key)
-            phase = f"{label:<10} {color}{_mini_bar(frac, 16)}{_RESET} {int(frac * 100):3d}%"
-        else:
-            phase = f"{color}{self._phase_text}{_RESET}"
-        clock = _fmt_clock(_time.monotonic() - self._t0)
-        sys.stdout.write(
-            f"\r\033[K  {color}{_SPINNER[self._spin]}{_RESET} "
-            f"{_DIM}[{self.idx}/{self.total}]{_RESET} {name} {phase} {_DIM}{clock}{_RESET}"
-        )
+        sys.stdout.write(f"\r\033[K  {self.render(_SPINNER[self._spin])}")
         sys.stdout.flush()
 
-    # -- state updates ---------------------------------------------------
     def phase(self, key: str, text: str) -> None:
         """Set the current phase label + color, clearing any frame bar."""
         with self._lock:
-            self._phase_key = key
-            self._phase_text = text
-            self._fn = self._ftotal = 0
+            self._set_phase(key, text)
             self._paint()
 
     def __call__(self, event: str, payload: dict) -> None:
         try:
-            self._dispatch(event, payload or {})
+            with self._lock:
+                self._apply(event, payload or {})
+                self._paint()
         except Exception:  # pragma: no cover - progress must never break a run
             pass
-
-    def _dispatch(self, event: str, payload: dict) -> None:
-        if event == "frames":  # frame-based bar for the named stage
-            with self._lock:
-                stage = payload.get("stage")
-                if stage:
-                    self._phase_key = stage
-                self._fn = int(payload.get("n", 0))
-                self._ftotal = int(payload.get("total", 0))
-                self._paint()
-            return
-
-        if event == "status":
-            stage = payload.get("stage")
-            if stage == "preprocessing":
-                self.phase("preprocess", "preprocessing…")
-            elif stage == "tracking":
-                self.phase("track", "tracking…")
-            return
-
-        if event == "started":  # legacy per-frame tracking
-            self.phase("track", "tracking…")
-            return
-
-        if event == "tracking":
-            st = payload.get("status")
-            if st == "starting":
-                self.phase("track", "tracking…")
-            elif st == "complete":
-                with self._lock:
-                    if self._ftotal:
-                        self._fn = self._ftotal
-                    self._paint()
-            return
-
-        if event in ("pose", "pose_done"):
-            self.phase("pose", "pose…")
-            return
 
     def finish(self, summary: str, ok: bool = True) -> None:
         """Stop the animation and replace the live line with a result."""
@@ -330,13 +339,107 @@ class BatchProgress:
             self._thread.join(timeout=0.5)
         with self._lock:
             self._finished = True
-            color = _ANSI["done"] if ok else _ANSI["error"]
-            mark = "✓" if ok else "✗"
-            name = self.name[:self._NAME_W].ljust(self._NAME_W)
-            line = (f"  {color}{mark}{_RESET} {_DIM}[{self.idx}/{self.total}]{_RESET} "
-                    f"{name} {_DIM}{summary}{_RESET}")
+            line = f"  {self.result_line(summary, ok)}"
             if self._tty:
                 sys.stdout.write(f"\r\033[K{line}\n")
                 sys.stdout.flush()
             else:
                 print(line)
+
+
+class BatchProgressGroup:
+    """Multi-line live progress for *concurrent* videos (Phase 4 concurrency).
+
+    Owns a bottom "live region" of one line per in-flight video. :meth:`acquire`
+    hands out a :class:`_Slot` (same ``progress_hook`` / ``phase`` / ``finish``
+    interface as :class:`BatchProgress`, but threadless — the group's single
+    painter thread redraws every slot ~10×/s). :meth:`_commit` (via
+    ``slot.finish``) prints a video's final line as permanent scrollback above the
+    shrinking live region. Off a TTY, only committed result lines are printed.
+    """
+
+    def __init__(self, total: int):
+        self.total = total
+        self._tty = bool(getattr(sys.stdout, "isatty", lambda: False)())
+        self._lock = threading.Lock()
+        self._slots: list = []      # active _Slot, in acquisition order
+        self._drawn = 0             # live-region lines currently on screen
+        self._spin = 0
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        if self._tty:
+            self._thread = threading.Thread(target=self._tick, daemon=True)
+            self._thread.start()
+
+    def acquire(self, idx: int, name: str) -> "_Slot":
+        slot = _Slot(self, idx, name)
+        with self._lock:
+            self._slots.append(slot)
+        return slot
+
+    def _tick(self) -> None:
+        while not self._stop.wait(0.1):
+            with self._lock:
+                self._spin = (self._spin + 1) % len(_SPINNER)
+                self._repaint()
+
+    def _repaint(self) -> None:
+        """Redraw the whole live region in place (lock held, TTY only)."""
+        if not self._tty:
+            return
+        if self._drawn:
+            sys.stdout.write(f"\033[{self._drawn}A")   # up to the top of the region
+        spin = _SPINNER[self._spin]
+        for slot in self._slots:
+            sys.stdout.write(f"\r\033[K  {slot.render(spin)}\n")
+        self._drawn = len(self._slots)
+        sys.stdout.flush()
+
+    def _commit(self, slot: "_Slot", summary: str, ok: bool) -> None:
+        """Print a finished video's line as permanent scrollback, drop its slot."""
+        with self._lock:
+            line = f"  {slot.result_line(summary, ok)}"
+            if not self._tty:
+                print(line)
+                self._remove(slot)
+                return
+            if self._drawn:
+                sys.stdout.write(f"\033[{self._drawn}A\r")  # top of region, col 0
+            sys.stdout.write("\033[J")                       # clear region to end of screen
+            sys.stdout.write(line + "\n")                    # permanent result line
+            self._remove(slot)
+            self._drawn = 0
+            self._repaint()                                  # redraw survivors below it
+
+    def _remove(self, slot: "_Slot") -> None:
+        try:
+            self._slots.remove(slot)
+        except ValueError:
+            pass
+
+    def close(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=0.5)
+
+
+class _Slot(_LiveLine):
+    """One video's line inside a :class:`BatchProgressGroup` (threadless)."""
+
+    def __init__(self, group: BatchProgressGroup, idx: int, name: str):
+        super().__init__(idx, group.total, name)
+        self._group = group
+
+    def phase(self, key: str, text: str) -> None:
+        with self._group._lock:
+            self._set_phase(key, text)
+
+    def __call__(self, event: str, payload: dict) -> None:
+        try:
+            with self._group._lock:
+                self._apply(event, payload or {})
+        except Exception:  # pragma: no cover
+            pass
+
+    def finish(self, summary: str, ok: bool = True) -> None:
+        self._group._commit(self, summary, ok)
