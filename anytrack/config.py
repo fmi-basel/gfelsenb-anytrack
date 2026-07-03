@@ -100,6 +100,15 @@ class AnyTrackConfig:
     output_format: str = "parquet"      # "parquet" or "csv"
     output_dir: str = ""                # Default directory for saved results
 
+    # Pose (Milestone B). The keypoint *schema* is a graph, so it lives in a JSON
+    # skeleton sidecar (pose_skeleton), not here — config.toml is scalar-only.
+    pose_enabled: bool = False          # run the pose stage after tracking
+    pose_backend: str = "sleap-nn"      # concrete PoseEngine backend
+    sleap_model_path: str = ""          # trained model path (empty -> mock engine)
+    pose_skeleton: str = ""             # path to a skeleton JSON (empty -> built-in fly5)
+    pose_every_n: int = 1               # infer pose every Nth tracked frame (1 = every frame)
+    pose_batch_size: int = 64           # crops per inference batch
+
     # Quality control
     qc_min_contrast: float = 10.0       # flag_low_contrast when detection contrast < this
     qc_montage_max: int = 25            # max flagged-frame thumbnails in the QC montage

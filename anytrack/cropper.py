@@ -193,6 +193,84 @@ def export_crops(
     return manifest
 
 
+def iter_crop_batches(
+    video,
+    df: pd.DataFrame,
+    cfg,
+    size: Optional[int] = None,
+    every_n: Optional[int] = None,
+    batch_size: Optional[int] = None,
+    roi_col: str = "roi",
+    frame_col: str = "frame",
+    x_col: str = "x",
+    y_col: str = "y",
+    t_col: str = "t_s",
+):
+    """Yield ``(crops[N,S,S] uint8, metas)`` batches of centroid crops for pose.
+
+    INFERENCE-mode counterpart to :func:`export_crops`: a second full-resolution
+    pass over the source video that streams batches to a PoseEngine instead of
+    writing PNGs. Honors ``cfg.pose_every_n`` and ``cfg.pose_batch_size``. Each
+    meta carries roi/track_id/frame/t_s, the full-frame centroid, the crop origin
+    (crop_x0/crop_y0) and out_of_bounds.
+    """
+    size = int(size if size is not None else getattr(cfg, "crop_size", 96))
+    every_n = int(every_n if every_n is not None else getattr(cfg, "pose_every_n", 1))
+    batch_size = int(batch_size if batch_size is not None else getattr(cfg, "pose_batch_size", 64))
+    pad = getattr(cfg, "crop_pad_mode", "background")
+
+    if df.empty:
+        return
+
+    needed: Dict[int, List[Dict[str, Any]]] = {}
+    has_tid = "track_id" in df.columns
+    has_t = t_col in df.columns
+    for _, row in df.iterrows():
+        fidx = int(row[frame_col])
+        if every_n > 1 and (fidx % every_n != 0):
+            continue
+        needed.setdefault(fidx, []).append({
+            "roi": str(row[roi_col]),
+            "track_id": int(row["track_id"]) if has_tid else 0,
+            "frame": fidx,
+            "t_s": float(row[t_col]) if has_t else float("nan"),
+            "x_full": float(row[x_col]),
+            "y_full": float(row[y_col]),
+        })
+    if not needed:
+        return
+
+    cap = cv2.VideoCapture(str(video.video_path))
+    if not cap.isOpened():
+        raise FileNotFoundError(f"Could not open video: {video.video_path}")
+
+    batcher = CropBatcher(batch_size)
+    max_needed = max(needed)
+    fidx = 0
+    try:
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            if fidx in needed:
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
+                pad_value = float(np.median(gray)) if pad == "background" else None
+                for m in needed[fidx]:
+                    crop, cx0, cy0, oob = extract_crop(gray, m["x_full"], m["y_full"], size,
+                                                       pad=pad, pad_value=pad_value)
+                    meta = dict(m, crop_x0=cx0, crop_y0=cy0, out_of_bounds=bool(oob))
+                    batcher.add(crop, meta)
+                    if batcher.ready():
+                        yield batcher.pop()
+            fidx += 1
+            if fidx > max_needed:
+                break
+    finally:
+        cap.release()
+    if len(batcher):
+        yield batcher.pop()
+
+
 def _load_tracks(path: Path) -> pd.DataFrame:
     """Read a finished session's tracks table (parquet or CSV)."""
     if path.suffix.lower() == ".csv":

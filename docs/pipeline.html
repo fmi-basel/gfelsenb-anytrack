@@ -191,11 +191,11 @@ const PIPELINE = [
   {name:"Coordinate conversion", mod:"coordinates.py", status:"done",
    desc:"scaled/ROI/crop ↔ full-frame helpers. Fast path routes through it; pose-merge use lands in B."},
   {name:"Dynamic centroid crop", mod:"cropper.py", status:"done",
-   desc:"Full-res centroid-centered crops (padding + OOB), CropBatcher, crop-export + manifest for labeling. Per-frame pose batching wired in B."},
-  {name:"Batch crops → SLEAP pose", mod:"sleap_inference.py", status:"planned",
-   desc:"Backend-agnostic PoseEngine + sleap-nn (PyTorch/MPS); centered-instance inference."},
-  {name:"Keypoints → full-frame merge", mod:"coordinates.py", status:"planned",
-   desc:"crop↔full helpers exist; assembling the long-format pose table is the planned stage (B)."},
+   desc:"Full-res centroid-centered crops (padding + OOB), CropBatcher, crop-export + manifest for labeling, and iter_crop_batches (B1) streaming inference batches."},
+  {name:"Batch crops → pose", mod:"pose/", status:"partial",
+   desc:"B0+B1 done: Skeleton (fly5: head/thorax/abdomen_tip/wingL/wingR) + backend-agnostic PoseEngine protocol + MockPoseEngine + pose.pipeline.run_pose (crop→infer→merge→long df), all mock-tested. Real sleap-nn engine + in-package label/train GUI = B2-B5."},
+  {name:"Keypoints → full-frame merge", mod:"coordinates.py", status:"done",
+   desc:"crop↔full↔ROI helpers; run_pose assembles the long-format pose table (roi/track_id/frame/keypoint/x_full/x_roi/x_crop/score)."},
   {name:"Output (tracks / pose / diagnostics)", mod:"writer.py", status:"done",
    desc:"Parquet-default (CSV kept) writer + streaming TrackWriter implemented. Pose/diagnostics schemas + session auto-save wiring land with A7/B."},
   {name:"QC overlays & diagnostics", mod:"qc.py", status:"done",
@@ -218,7 +218,7 @@ const MODULES = [
   {mod:"session.py",       resp:"Orchestration; x_roi/y_roi columns wired into output (A7). Pose stage pending (B).", status:"partial"},
   {mod:"run.py",           resp:"Headless full-pipeline CLI: anytrack-run (ROI detect → track → write to --output; --qc/--crops chaining). tqdm progress bars + formatted phase output via cli_progress.py (NEW).", status:"done"},
   {mod:"gui/app.py",       resp:"Debug window now renders from detector.debug_frame (A7). Pose overlay (B); optional in-GUI crop-export menu deferred (CLI exists).", status:"partial"},
-  {mod:"sleap_inference.py", resp:"Pose engine — not yet created (B).", status:"planned"},
+  {mod:"pose/ (skeleton, engine, pipeline)", resp:"Skeleton (fly5) + PoseEngine protocol + MockPoseEngine + run_pose plumbing (B0+B1). sleap-nn engine + label/train GUI pending (B2-B5).", status:"partial"},
   {mod:"qc.py",            resp:"Background PNG + ROI-colored overlay + distributions/timeseries/kinematics/occupancy/coverage figures + flagged-frame montage + flags/summary + qc_report.html + anytrack-qc CLI (NEW).", status:"done"},
 ];
 
@@ -235,11 +235,12 @@ const MILESTONE_A = [
 ];
 
 const MILESTONE_B = [
-  {code:"B1", t:"optional pose deps (torch, sleap-nn)", status:"planned", n:"Lazy import; classical install unaffected."},
-  {code:"B2", t:"sleap_inference.py (PoseEngine)", status:"planned", n:"Backend-agnostic; sleap-nn / MPS engine."},
-  {code:"B3", t:"training-data workflow", status:"planned", n:"Export crops → label → centered-instance model + jitter aug."},
-  {code:"B4", t:"inference pass + coordinate merge", status:"planned", n:"CropBatcher → infer → keypoints → full-frame; write_pose."},
-  {code:"B5", t:"session + GUI + QC", status:"planned", n:"Pose stage, overlays, confidence / swap flags."},
+  {code:"B0", t:"skeleton + PoseEngine + mock", status:"done", n:"pose/skeleton.py (fly5: head/thorax/abdomen_tip/wingL/wingR + edges/symmetry), PoseEngine protocol, MockPoseEngine, pose config fields. No heavy deps."},
+  {code:"B1", t:"crop batching + pose pass + merge", status:"done", n:"cropper.iter_crop_batches + pose.pipeline.run_pose (crop→infer→crop/full/ROI merge→long df) + write_pose. Mock-tested incl. coordinate round-trip."},
+  {code:"B2", t:"in-package quick-label GUI", status:"planned", n:"ttkbootstrap; sample→click keypoints→sleap-io .slp. crop_size=96."},
+  {code:"B3", t:"training (sleap-nn via sleap-io)", status:"planned", n:".slp → centered-instance model on MPS; jitter/brightness aug. Own-trainer fallback."},
+  {code:"B4", t:"SleapNNEngine + optional deps", status:"planned", n:"Lazy sleap-nn[torch] import; validate on real crops."},
+  {code:"B5", t:"session + CLI + QC + GUI", status:"planned", n:"pose stage, anytrack-run --pose, skeleton overlay, confidence / wing-swap flags."},
   {code:"B6", t:"crops/s benchmark", status:"planned", n:"Every-frame vs sparse; batch-size sweep."},
 ];
 
