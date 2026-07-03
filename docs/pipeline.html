@@ -193,7 +193,7 @@ const PIPELINE = [
   {name:"Dynamic centroid crop", mod:"cropper.py", status:"done",
    desc:"Full-res centroid-centered crops (padding + OOB), CropBatcher, crop-export + manifest for labeling, and iter_crop_batches (B1) streaming inference batches."},
   {name:"Batch crops → pose", mod:"pose/", status:"partial",
-   desc:"B0+B1 done: Skeleton (fly5: head/thorax/abdomen_tip/wingL/wingR) + backend-agnostic PoseEngine protocol + MockPoseEngine + pose.pipeline.run_pose (crop→infer→merge→long df), all mock-tested. Real sleap-nn engine + in-package label/train GUI = B2-B5."},
+   desc:"B0-B5(core) done: Skeleton (fly5) + PoseEngine + MockPoseEngine + run_pose; anytrack-label quick-label GUI; anytrack-train sleap-nn centered-instance training; SleapNNEngine (Predictor.predict); pose stage (tracks→Labels→predict→long pose df) + session (cfg.pose_enabled) + anytrack-run --pose → <stem>_pose.parquet. Validated end-to-end on the real 18k-frame clip. Remaining: QC skeleton overlay + confidence/wing-swap flags, GUI pose overlay, B6 benchmark."},
   {name:"Keypoints → full-frame merge", mod:"coordinates.py", status:"done",
    desc:"crop↔full↔ROI helpers; run_pose assembles the long-format pose table (roi/track_id/frame/keypoint/x_full/x_roi/x_crop/score)."},
   {name:"Output (tracks / pose / diagnostics)", mod:"writer.py", status:"done",
@@ -218,7 +218,7 @@ const MODULES = [
   {mod:"session.py",       resp:"Orchestration; x_roi/y_roi columns wired into output (A7). Pose stage pending (B).", status:"partial"},
   {mod:"run.py",           resp:"Headless full-pipeline CLI: anytrack-run (ROI detect → track → write to --output; --qc/--crops chaining). tqdm progress bars + formatted phase output via cli_progress.py (NEW).", status:"done"},
   {mod:"gui/app.py",       resp:"Debug window now renders from detector.debug_frame (A7). Pose overlay (B); optional in-GUI crop-export menu deferred (CLI exists).", status:"partial"},
-  {mod:"pose/ (skeleton, engine, pipeline)", resp:"Skeleton (fly5) + PoseEngine protocol + MockPoseEngine + run_pose plumbing (B0+B1). sleap-nn engine + label/train GUI pending (B2-B5).", status:"partial"},
+  {mod:"pose/ (skeleton, engine, pipeline, labeling, label_gui, train, engine_sleap, infer)", resp:"B0-B5(core): Skeleton+PoseEngine+Mock+run_pose; anytrack-label GUI + JSON store + .slp; anytrack-train (B3); SleapNNEngine/Predictor (B4); pose stage infer.py (tracks→Labels→predict→long df) + run_pose_stage dispatcher + session + anytrack-run --pose (B5). Validated end-to-end on the real clip. Pending: QC skeleton overlay + wing-swap/confidence flags, GUI pose overlay, B6 benchmark.", status:"partial"},
   {mod:"qc.py",            resp:"Background PNG + ROI-colored overlay + distributions/timeseries/kinematics/occupancy/coverage figures + flagged-frame montage + flags/summary + qc_report.html + anytrack-qc CLI (NEW).", status:"done"},
 ];
 
@@ -237,10 +237,10 @@ const MILESTONE_A = [
 const MILESTONE_B = [
   {code:"B0", t:"skeleton + PoseEngine + mock", status:"done", n:"pose/skeleton.py (fly5: head/thorax/abdomen_tip/wingL/wingR + edges/symmetry), PoseEngine protocol, MockPoseEngine, pose config fields. No heavy deps."},
   {code:"B1", t:"crop batching + pose pass + merge", status:"done", n:"cropper.iter_crop_batches + pose.pipeline.run_pose (crop→infer→crop/full/ROI merge→long df) + write_pose. Mock-tested incl. coordinate round-trip."},
-  {code:"B2", t:"in-package quick-label GUI", status:"planned", n:"ttkbootstrap; sample→click keypoints→sleap-io .slp. crop_size=96."},
-  {code:"B3", t:"training (sleap-nn via sleap-io)", status:"planned", n:".slp → centered-instance model on MPS; jitter/brightness aug. Own-trainer fallback."},
-  {code:"B4", t:"SleapNNEngine + optional deps", status:"planned", n:"Lazy sleap-nn[torch] import; validate on real crops."},
-  {code:"B5", t:"session + CLI + QC + GUI", status:"planned", n:"pose stage, anytrack-run --pose, skeleton overlay, confidence / wing-swap flags."},
+  {code:"B2", t:"in-package quick-label GUI", status:"done", n:"anytrack-label: headless core (pose/labeling.py: diversity/uniform/random sampling, ellipse-seeded keypoints, native JSON store w/ autosave+resume, manifest df, lazy .slp export, node-color resolve, tqdm crop extraction w/ +/-N temporal context window) + thin ttkbootstrap canvas (pose/label_gui.py; keyboard-first, drag, visibility toggle, wing-swap, bad-frame, per-node text annotations, node-colored buttons via custom ttk styles, dynamics scrub through context frames [,/./0] on a fixed anchor box, anchor-only editing). Configurable: cfg.pose_node_colors, cfg.pose_label_context, crop_size=96. Fully unit-tested (no display/heavy deps)."},
+  {code:"B3", t:"training (sleap-nn via sleap-io)", status:"done", n:"anytrack-train (pose/train.py): label-store .json → .slp → sleap_nn.train.train() centered-instance UNet, crop_size=96, ensure_grayscale, aug=brightness/contrast+rotation/translate, MPS. Validated: 30-frame smoke train → best.ckpt. sleap-nn 0.3.0 / sleap-io 0.8.0 / torch 2.12 (manual install; py>=3.11). Fixed sio.Skeleton in-place-mutation NaN-export bug."},
+  {code:"B4", t:"SleapNNEngine + optional deps", status:"done", n:"pose/engine_sleap.py: load via sleap_nn.load_models([dir],device=mps) → Predictor; inference = predict_labels(sio.Labels), NOT crop-feeding (internal layers are wrappers, not nn.Modules — found by inspecting the installed pkg). build_engine factory (mock fallback when no model). Validated: build_engine→predict_labels on trained model on MPS. heatmaps_to_keypoints kept as tested generic util."},
+  {code:"B5", t:"session + CLI + QC + GUI", status:"partial", n:"DONE: pose stage (pose/infer.py: tracks df → sio.Labels @ tracker centroids → Predictor.predict → long pose df, nearest-centroid ROI matching); run_pose_stage dispatcher (mock=crops / sleap=predict); session pose stage (cfg.pose_enabled → session.pose_dataframe); anytrack-run --pose/--pose-model/--pose-device/--pose-every-n → <stem>_pose.parquet. Validated on real tracks. PENDING: QC skeleton overlay + confidence/wing-swap flags, GUI pose overlay."},
   {code:"B6", t:"crops/s benchmark", status:"planned", n:"Every-frame vs sparse; batch-size sweep."},
 ];
 

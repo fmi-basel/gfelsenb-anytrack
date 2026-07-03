@@ -10,3 +10,6 @@ __pycache__/
 # Local / session
 /dev-claude
 fast_hybrid_tracking_pipeline_plan.md
+
+# Run outputs (tracks/pose/models/crops, labels, staged videos)
+/out/

@@ -26,6 +26,21 @@ anytrack-roi = "anytrack.cli:roi_main"
 anytrack-bench = "anytrack.benchmark:main"
 anytrack-crop-export = "anytrack.cropper:main"
 anytrack-qc = "anytrack.qc:main"
+anytrack-label = "anytrack.pose.label_gui:main"
+anytrack-train = "anytrack.pose.train:main"
+
+[project.optional-dependencies]
+# Pose labeling/export bridge (Milestone B). Optional: the classical tracker and
+# the label GUI work without it. sleap-io reads/writes .slp for the SLEAP
+# training handoff and has broad Python support.
+#   uv pip install 'anytrack[pose]'
+pose = [
+  "sleap-io>=0.1",
+]
+# The training/inference backend (sleap-nn + torch) is NOT declared here: it is
+# prerelease (v0.x), requires Python >=3.11, and pinning it breaks uv's universal
+# resolver for the base project. Install it directly into the pose environment:
+#   uv pip install --prerelease=allow 'sleap-nn[torch]'
 
 [build-system]
 requires = ["hatchling"]

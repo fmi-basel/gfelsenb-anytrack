@@ -108,6 +108,17 @@ class AnyTrackConfig:
     pose_skeleton: str = ""             # path to a skeleton JSON (empty -> built-in fly5)
     pose_every_n: int = 1               # infer pose every Nth tracked frame (1 = every frame)
     pose_batch_size: int = 64           # crops per inference batch
+    pose_device: str = "auto"           # torch device for the engine: auto|mps|cuda|cpu
+    # Per-node label colors for the labeling GUI, as "name:#hex,name:#hex,..."
+    # (config.toml is scalar-only, so this is a string). Nodes not listed fall
+    # back to a built-in default, then a distinct-color cycle.
+    pose_node_colors: str = ("head:#ff5252,thorax:#ffd740,abdomen_tip:#40c4ff,"
+                             "wingL:#69f0ae,wingR:#e040fb")
+    # Temporal context loaded around each labeled frame in the GUI: +/- this many
+    # neighbor frames (default 10 -> ~20 frames around it). Scrub through them to
+    # read the fly's dynamics (motion direction disambiguates head/tail). Neighbor
+    # crops use the anchor centroid (fixed box), so labels overlay consistently.
+    pose_label_context: int = 10
 
     # Quality control
     qc_min_contrast: float = 10.0       # flag_low_contrast when detection contrast < this

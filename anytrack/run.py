@@ -79,6 +79,13 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help="Render every Nth frame in the QC overlay (default from config: 5; 1 = every frame).")
     ap.add_argument("--crops", action="store_true",
                     help="Also export centroid-centered crops (A5).")
+    ap.add_argument("--pose", action="store_true",
+                    help="Also run the pose stage (keypoints) after tracking (B5).")
+    ap.add_argument("--pose-model", type=Path, default=None,
+                    help="Trained sleap-nn model dir (sets sleap_model_path; implies --pose).")
+    ap.add_argument("--pose-device", default=None, help="Pose torch device: auto|mps|cuda|cpu.")
+    ap.add_argument("--pose-every-n", type=int, default=None,
+                    help="Run pose on every Nth tracked frame (default from config: 1).")
     args = ap.parse_args(argv)
 
     cfg = load_config()
@@ -94,6 +101,20 @@ def main(argv: Optional[List[str]] = None) -> int:
         cfg.qc_overlay_crf = 16
     if args.qc_overlay_stride is not None:  # explicit stride wins over --qc-full
         cfg.qc_overlay_stride = max(1, args.qc_overlay_stride)
+
+    if args.pose_model is not None:
+        cfg.sleap_model_path = str(args.pose_model)
+        args.pose = True
+    if args.pose:
+        cfg.pose_enabled = True
+    if args.pose_device is not None:
+        cfg.pose_device = args.pose_device
+    if args.pose_every_n is not None:
+        cfg.pose_every_n = max(1, args.pose_every_n)
+    if (cfg.pose_enabled and str(cfg.pose_backend).lower().startswith("sleap")
+            and not cfg.sleap_model_path):
+        ap.error("--pose with the sleap-nn backend needs a trained model: pass --pose-model <dir> "
+                 "(or set sleap_model_path in config). Train one with anytrack-train.")
 
     if not args.video.exists():
         ap.error(f"video not found: {args.video}")
@@ -128,6 +149,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     rows_s = (len(df) / dt) if dt > 0 else 0.0
     ok(f"tracked {len(df)} rows in {dt:.1f}s ({rows_s:.0f} rows/s)")
     info(f"→ {out}")
+
+    if cfg.pose_enabled and getattr(session, "pose_dataframe", None) is not None:
+        from .writer import write_pose
+        pose_out = out.with_name(out.stem.replace("_tracks", "") + "_pose" + out.suffix)
+        write_pose(session.pose_dataframe, pose_out, fmt=fmt)
+        ok(f"pose: {len(session.pose_dataframe)} rows ({session.pose_dataframe['keypoint'].nunique()} keypoints) → {pose_out}")
+    elif cfg.pose_enabled:
+        info("pose stage produced no output (see warnings above).")
 
     if args.qc or args.qc_full:
         from .qc import run_qc

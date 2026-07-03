@@ -8,9 +8,11 @@ built and tested with :class:`MockPoseEngine`, so the real sleap-nn engine
 """
 from __future__ import annotations
 
-from typing import List, Protocol, Tuple, runtime_checkable
+from typing import List, Optional, Protocol, Tuple, runtime_checkable
 
 import numpy as np
+
+from .skeleton import Skeleton, get_skeleton
 
 
 @runtime_checkable
@@ -59,3 +61,79 @@ class MockPoseEngine:
             kps[:, j, 1] = center + fy * s
         scores = np.ones((n, k), dtype=np.float32)
         return kps, scores
+
+
+# --- shared peak extraction (used by real heatmap-based engines) -------------
+
+def heatmaps_to_keypoints(
+    heatmaps: np.ndarray,
+    crop_size: int,
+    method: str = "argmax",
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Convert confidence maps to crop-local keypoints + scores.
+
+    ``heatmaps`` is ``(N, K, h, w)``; the heatmap grid may be smaller than the
+    crop (stride > 1), so peak coordinates are rescaled to crop-local pixels by
+    ``crop_size / w`` (x) and ``crop_size / h`` (y), with a +0.5 pixel-center
+    offset. Returns ``(keypoints[N,K,2] crop-local, scores[N,K])`` where the
+    score is the peak confidence value.
+
+    ``method="argmax"`` takes the single peak pixel; ``method="centroid"`` is a
+    soft-argmax (confidence-weighted mean over the grid) for sub-pixel accuracy.
+    This is pure numpy so it is fully testable without a model or torch.
+    """
+    hm = np.asarray(heatmaps, dtype=np.float32)
+    if hm.ndim != 4:
+        raise ValueError(f"heatmaps must be (N,K,h,w), got shape {hm.shape}")
+    n, k, h, w = hm.shape
+    sx, sy = crop_size / w, crop_size / h
+    kps = np.empty((n, k, 2), dtype=np.float32)
+
+    if method == "argmax":
+        flat = hm.reshape(n, k, h * w)
+        idx = flat.argmax(axis=-1)
+        scores = np.take_along_axis(flat, idx[..., None], axis=-1)[..., 0]
+        yy, xx = np.divmod(idx, w)
+        kps[..., 0] = (xx + 0.5) * sx
+        kps[..., 1] = (yy + 0.5) * sy
+        return kps, scores.astype(np.float32)
+
+    if method == "centroid":
+        pos = np.clip(hm, 0.0, None)
+        mass = pos.reshape(n, k, h * w).sum(axis=-1)               # (N,K)
+        gy, gx = np.mgrid[0:h, 0:w].astype(np.float32)
+        wx = (pos * gx).reshape(n, k, h * w).sum(axis=-1)
+        wy = (pos * gy).reshape(n, k, h * w).sum(axis=-1)
+        safe = np.where(mass > 0, mass, 1.0)
+        cx = np.where(mass > 0, wx / safe, (w - 1) / 2.0)
+        cy = np.where(mass > 0, wy / safe, (h - 1) / 2.0)
+        kps[..., 0] = (cx + 0.5) * sx
+        kps[..., 1] = (cy + 0.5) * sy
+        scores = hm.reshape(n, k, h * w).max(axis=-1)
+        return kps, scores.astype(np.float32)
+
+    raise ValueError(f"unknown peak method {method!r} (use 'argmax' or 'centroid')")
+
+
+# --- engine factory ----------------------------------------------------------
+
+def build_engine(cfg, skeleton: Optional[Skeleton] = None) -> PoseEngine:
+    """Resolve the configured :class:`PoseEngine`.
+
+    Falls back to :class:`MockPoseEngine` when no trained model is available
+    (``sleap_model_path`` empty) or the backend is ``"mock"``, so the pipeline
+    always has a working engine. A ``"sleap-nn"`` backend with a model path
+    lazily constructs :class:`~anytrack.pose.engine_sleap.SleapNNEngine`
+    (raising a clear error if torch/sleap-nn are not installed).
+    """
+    skeleton = skeleton or get_skeleton(cfg)
+    backend = str(getattr(cfg, "pose_backend", "") or "").lower()
+    model_path = str(getattr(cfg, "sleap_model_path", "") or "")
+
+    if backend in ("", "mock") or not model_path:
+        return MockPoseEngine(skeleton)
+    if backend in ("sleap-nn", "sleap_nn", "sleapnn"):
+        from .engine_sleap import SleapNNEngine
+        return SleapNNEngine(model_path, skeleton,
+                             device=str(getattr(cfg, "pose_device", "auto") or "auto"))
+    raise ValueError(f"unknown pose_backend {backend!r} (use 'sleap-nn' or 'mock')")

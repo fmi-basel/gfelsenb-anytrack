@@ -18,6 +18,7 @@ class TrackingSession:
     video: VideoAsset
     result: Optional[TrackingResult] = None
     dataframe: Optional[pd.DataFrame] = None
+    pose_dataframe: Optional[pd.DataFrame] = None
 
     def run(self, progress_hook=None, cancel_event=None, progress_every: int = 1) -> pd.DataFrame:
         import dataclasses
@@ -88,6 +89,29 @@ class TrackingSession:
         df = add_roi_local_columns(df, self.video.rois)
 
         self.dataframe = df
+
+        # Pose stage (Milestone B5): optional, runs the trained keypoint model on
+        # the finished centroids. Uses the original video path (not a staged copy,
+        # which may already be cleaned up). Failures are non-fatal: tracking output
+        # is still returned.
+        self.pose_dataframe = None
+        if getattr(self.cfg, "pose_enabled", False):
+            if progress_hook is not None:
+                try:
+                    progress_hook("pose", {"status": "start"})
+                except Exception:
+                    pass
+            try:
+                from .pose.pipeline import run_pose_stage
+                self.pose_dataframe = run_pose_stage(self.video, df, self.cfg, show_progress=True)
+                if progress_hook is not None:
+                    progress_hook("pose_done", {"pose": self.pose_dataframe})
+            except Exception as e:
+                if progress_hook is not None:
+                    try:
+                        progress_hook("pose_error", {"exc": repr(e)})
+                    except Exception:
+                        pass
 
         if progress_hook is not None:
             try:

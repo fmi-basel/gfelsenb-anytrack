@@ -69,3 +69,20 @@ def run_pose(video, df: pd.DataFrame, cfg, engine, show_progress: bool = False) 
         pbar.close()
 
     return pd.DataFrame.from_records(records, columns=POSE_COLUMNS)
+
+
+def run_pose_stage(video, df: pd.DataFrame, cfg, engine=None, show_progress: bool = False) -> pd.DataFrame:
+    """Run the pose stage with the configured engine, returning a long pose df.
+
+    Dispatches on the engine's capability: a sleap-nn engine (``predict_labels``)
+    goes through the tracks→Labels→predict path (:mod:`anytrack.pose.infer`); any
+    crop-based engine (e.g. :class:`~anytrack.pose.engine.MockPoseEngine`) goes
+    through :func:`run_pose`. Builds the engine from ``cfg`` if not supplied.
+    """
+    if engine is None:
+        from .engine import build_engine
+        engine = build_engine(cfg)
+    if hasattr(engine, "predict_labels"):
+        from .infer import run_pose_sleap
+        return run_pose_sleap(video, df, cfg, engine, show_progress=show_progress)
+    return run_pose(video, df, cfg, engine, show_progress=show_progress)
