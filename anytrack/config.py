@@ -91,7 +91,8 @@ class AnyTrackConfig:
     bg_step_down: float = 0.02          # Update step toward darker observations (<< step_up)
 
     # Dynamic centroid crops (for pose / labeling)
-    crop_size: int = 128                # NxN crop centered on the tracked centroid
+    crop_size: int = 96                 # NxN crop centered on the tracked centroid
+                                        # (fly ~40-50px + wing/jitter margin; override via --crop-size)
     crop_pad_mode: str = "background"   # "background" or "edge"
     crop_export_dir: str = ""           # Where exported crops + manifest are written
 
