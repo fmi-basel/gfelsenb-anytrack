@@ -122,6 +122,13 @@
     per-ROI tracking) is the default; use <code>--no-fast</code> for the single-pass path, or
     <code>--downscale</code>/<code>--workers</code> to tune fast mode.</p>
 
+  <div class="note"><strong>Batch mode.</strong> Pass a <em>directory</em> to <code>--video</code>
+    and anytrack discovers the videos in it, validates each (openable + timing CSV), then asks
+    <em>"Process all N videos? [Y/n]"</em> — answer <kbd>n</kbd> for a checkbox selector. Videos run
+    one at a time (each already parallelizes across ROIs). Same for <code>anytrack-label</code>,
+    where <code>--tracks</code>/<code>--labels</code> become directories resolved per video
+    (<code>&lt;stem&gt;_tracks.parquet</code> / <code>&lt;stem&gt;_labels.json</code>).</div>
+
   <p><strong>Output columns</strong> (long format, one row per animal per frame):</p>
   <table>
     <tr><th>column</th><th>meaning</th></tr>

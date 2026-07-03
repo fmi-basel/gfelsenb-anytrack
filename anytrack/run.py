@@ -124,71 +124,93 @@ def main(argv: Optional[List[str]] = None) -> int:
         ap.error("--pose with the sleap-nn backend needs a trained model: pass --pose-model <dir> "
                  "(or set sleap_model_path in config). Train one with anytrack-train.")
 
-    if not args.video.exists():
+    from .video_select import resolve_videos, validate_openable
+
+    # --video may be a single file (unchanged) or a directory (batch mode).
+    single = not Path(args.video).is_dir()
+
+    def _validator(v):
+        ok, reason = validate_openable(v)
+        if not ok:
+            return False, reason
+        tm = args.timing if (single and args.timing) else Path(v).with_suffix(".csv")
+        return (True, reason) if Path(tm).exists() else (False, "no timing CSV")
+
+    if single and not Path(args.video).exists():
         ap.error(f"video not found: {args.video}")
-    timing = args.timing or args.video.with_suffix(".csv")
-    if not Path(timing).exists():
-        ap.error(f"timing CSV not found: {timing} (pass --timing)")
+    if single:
+        _tm = args.timing or Path(args.video).with_suffix(".csv")
+        if not Path(_tm).exists():
+            ap.error(f"timing CSV not found: {_tm} (pass --timing)")
+    videos = resolve_videos(args.video, _validator)
+    if not videos:
+        ap.error(f"no videos to process for {args.video}")
 
-    video = load_video_asset(args.video, Path(timing))
+    def _run_one(video_path) -> bool:
+        timing = args.timing if (single and args.timing) else Path(video_path).with_suffix(".csv")
+        if not Path(timing).exists():
+            info(f"skip {Path(video_path).name}: timing CSV not found ({timing})")
+            return False
+        video = load_video_asset(Path(video_path), Path(timing))
+        header(f"anytrack · {Path(video_path).name}")
+        info(f"mode: {'fast' if cfg.fast_mode else 'legacy'}   frames: {video.frame_count}   timing: {Path(timing).name}")
 
-    header(f"anytrack · {args.video.name}")
-    info(f"mode: {'fast' if cfg.fast_mode else 'legacy'}   frames: {video.frame_count}   timing: {Path(timing).name}")
+        step("Detect ROIs (background + arena detection) …")
+        # Build the model background once; reuse it for ROI detection and QC.
+        bg_img = build_background_image(video.video_path, cfg) if (not video.rois or args.qc) else None
+        ensure_rois(video, cfg, background=bg_img)
+        if not video.rois:
+            info("No ROIs detected; nothing to track.")
+            return False
+        ok(f"{len(video.rois)} ROI(s): {', '.join(r.name for r in video.rois)}")
 
-    step("Detect ROIs (background + arena detection) …")
-    # Build the model background once; reuse it for ROI detection and QC.
-    bg_img = build_background_image(video.video_path, cfg) if (not video.rois or args.qc) else None
-    ensure_rois(video, cfg, background=bg_img)
-    if not video.rois:
-        info("No ROIs detected; nothing to track.")
-        return 1
-    ok(f"{len(video.rois)} ROI(s): {', '.join(r.name for r in video.rois)}")
+        progress = TqdmProgress()
+        t0 = time.perf_counter()
+        session = TrackingSession(cfg=cfg, video=video)
+        df = session.run(progress_hook=progress)
+        progress.close()
+        dt = time.perf_counter() - t0
 
-    progress = TqdmProgress()
-    t0 = time.perf_counter()
-    session = TrackingSession(cfg=cfg, video=video)
-    df = session.run(progress_hook=progress)
-    progress.close()
-    dt = time.perf_counter() - t0
+        out = _resolve_output_path(args.output, cfg, video)
+        fmt = "csv" if out.suffix.lower() == ".csv" else None
+        write_tracks(df, out, fmt=fmt)
+        rows_s = (len(df) / dt) if dt > 0 else 0.0
+        ok(f"tracked {len(df)} rows in {dt:.1f}s ({rows_s:.0f} rows/s)")
+        info(f"→ {out}")
 
-    out = _resolve_output_path(args.output, cfg, video)
-    fmt = "csv" if out.suffix.lower() == ".csv" else None
-    write_tracks(df, out, fmt=fmt)
-    rows_s = (len(df) / dt) if dt > 0 else 0.0
-    ok(f"tracked {len(df)} rows in {dt:.1f}s ({rows_s:.0f} rows/s)")
-    info(f"→ {out}")
+        if cfg.pose_enabled and getattr(session, "pose_dataframe", None) is not None:
+            from .writer import write_pose
+            pose_out = out.with_name(out.stem.replace("_tracks", "") + "_pose" + out.suffix)
+            write_pose(session.pose_dataframe, pose_out, fmt=fmt)
+            ok(f"pose: {len(session.pose_dataframe)} rows ({session.pose_dataframe['keypoint'].nunique()} keypoints) → {pose_out}")
+        elif cfg.pose_enabled:
+            info("pose stage produced no output (see warnings above).")
 
-    if cfg.pose_enabled and getattr(session, "pose_dataframe", None) is not None:
-        from .writer import write_pose
-        pose_out = out.with_name(out.stem.replace("_tracks", "") + "_pose" + out.suffix)
-        write_pose(session.pose_dataframe, pose_out, fmt=fmt)
-        ok(f"pose: {len(session.pose_dataframe)} rows ({session.pose_dataframe['keypoint'].nunique()} keypoints) → {pose_out}")
-    elif cfg.pose_enabled:
-        info("pose stage produced no output (see warnings above).")
+        if args.qc or args.qc_full:
+            from .qc import run_qc
+            step("QC (overlay + plots + flags + summary) …")
+            qc_dir = out.parent / f"{out.stem}_qc"
+            res = run_qc(video, df, cfg, qc_dir, overlay=True,
+                         max_frames=args.qc_max_frames, show_progress=True,
+                         background=bg_img, pose_df=getattr(session, "pose_dataframe", None),
+                         crop_roi=args.crop_roi, follow=args.follow, follow_size=args.follow_size,
+                         crop_output_size=args.crop_size)
+            ok(f"QC → {qc_dir}" + (f" (overlay {res['overlay_frames']} frames)"
+                                   if res.get("overlay_path") else " (overlay skipped)"))
+            if res.get("report_path"):
+                info(f"report: {res['report_path']}")
 
-    if args.qc or args.qc_full:
-        from .qc import run_qc
-        step("QC (overlay + plots + flags + summary) …")
-        qc_dir = out.parent / f"{out.stem}_qc"
-        res = run_qc(video, df, cfg, qc_dir, overlay=True,
-                     max_frames=args.qc_max_frames, show_progress=True,
-                     background=bg_img, pose_df=getattr(session, "pose_dataframe", None),
-                     crop_roi=args.crop_roi, follow=args.follow, follow_size=args.follow_size,
-                     crop_output_size=args.crop_size)
-        ok(f"QC → {qc_dir}" + (f" (overlay {res['overlay_frames']} frames)"
-                               if res.get("overlay_path") else " (overlay skipped)"))
-        if res.get("report_path"):
-            info(f"report: {res['report_path']}")
+        if args.crops:
+            from .cropper import export_crops
+            step("Export centroid crops …")
+            crops_dir = out.parent / f"{out.stem}_crops"
+            manifest = export_crops(video, df, cfg, out_dir=crops_dir, show_progress=True)
+            ok(f"exported {len(manifest)} crops → {crops_dir}")
+        return True
 
-    if args.crops:
-        from .cropper import export_crops
-        step("Export centroid crops …")
-        crops_dir = out.parent / f"{out.stem}_crops"
-        manifest = export_crops(video, df, cfg, out_dir=crops_dir, show_progress=True)
-        ok(f"exported {len(manifest)} crops → {crops_dir}")
-
-    header("done")
-    return 0
+    n_ok = sum(1 for v in videos if _run_one(v))
+    header(f"done — {n_ok}/{len(videos)} video(s)" if len(videos) > 1 else "done")
+    return 0 if n_ok else 1
 
 
 if __name__ == "__main__":

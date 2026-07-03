@@ -449,38 +449,80 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help="Start with empty keypoints instead of ellipse-seeded.")
     args = ap.parse_args(argv)
 
-    if not args.video.exists():
+    from ..video_select import resolve_videos, validate_openable
+
+    # --video may be a single file (unchanged) or a directory (batch mode). In
+    # batch mode --tracks/--labels must be directories: tracks are resolved per
+    # video as <stem>_tracks.parquet, labels saved as <stem>_labels.json.
+    single = not Path(args.video).is_dir()
+    if single and not Path(args.video).exists():
         ap.error(f"video not found: {args.video}")
 
     cfg = load_config()
     if args.crop_size is not None:
         cfg.crop_size = args.crop_size
 
-    save_path = args.labels or args.video.with_name(args.video.stem + "_labels.json")
+    if not single:
+        if args.labels and Path(args.labels).suffix.lower() == ".json":
+            ap.error("batch mode (--video is a directory): --labels must be a directory")
+        if args.tracks and Path(args.tracks).suffix.lower() in (".parquet", ".pq", ".csv"):
+            ap.error("batch mode (--video is a directory): --tracks must be a directory")
 
-    if save_path.exists():
-        store = LabelStore.load(save_path)
-        print(f"resuming {store.n_labeled()}/{len(store)} labeled from {save_path}")
-    else:
-        if args.tracks is None or not args.tracks.exists():
-            ap.error("a new session needs --tracks (existing tracks table). "
-                     f"(no resumable store at {save_path})")
-        df = _load_tracks(args.tracks)
-        store = LabelStore.from_tracks(
-            str(args.video), df, skeleton=get_skeleton(cfg), crop_size=cfg.crop_size,
-            n=args.n, strategy=args.strategy, seed=args.seed,
-            seed_ellipse=not args.no_seed_ellipse)
-        print(f"sampled {len(store)} frames ({args.strategy}) from {args.tracks}")
+    def _labels_for(v):
+        v = Path(v)
+        if args.labels is None:
+            return v.with_name(v.stem + "_labels.json")
+        lp = Path(args.labels)
+        return lp if (single and lp.suffix.lower() == ".json") else lp / f"{v.stem}_labels.json"
 
-    context = args.context if args.context is not None else getattr(cfg, "pose_label_context", 10)
-    context = max(0, int(context))
-    print(f"extracting crops (+/-{context} context frames per sample)…")
-    video = SimpleNamespace(video_path=args.video)
-    crops = extract_label_crops(video.video_path, store.frames, store.crop_size,
-                                pad=cfg.crop_pad_mode, context=context, show_progress=True)
+    def _tracks_for(v):
+        v = Path(v)
+        if args.tracks is None:
+            return None
+        tp = Path(args.tracks)
+        if single and tp.is_file():
+            return tp
+        return (tp / f"{v.stem}_tracks.parquet") if tp.is_dir() else tp
 
-    colors = resolve_node_colors(store.skeleton.nodes, getattr(cfg, "pose_node_colors", ""))
-    LabelApp(store, crops, save_path, zoom=args.zoom, node_colors=colors).run()
+    def _validator(v):
+        ok, reason = validate_openable(v)
+        if not ok:
+            return False, reason
+        if _labels_for(v).exists():
+            return True, "resume"
+        tp = _tracks_for(v)
+        return (True, reason) if (tp and Path(tp).exists()) else (False, "no tracks")
+
+    videos = resolve_videos(args.video, _validator)
+    if not videos:
+        ap.error(f"no videos to label for {args.video}")
+
+    context = max(0, int(args.context if args.context is not None
+                         else getattr(cfg, "pose_label_context", 10)))
+
+    for vp in videos:
+        vp = Path(vp)
+        save_path = _labels_for(vp)
+        if save_path.exists():
+            store = LabelStore.load(save_path)
+            print(f"[{vp.name}] resuming {store.n_labeled()}/{len(store)} labeled from {save_path}")
+        else:
+            tp = _tracks_for(vp)
+            if tp is None or not Path(tp).exists():
+                print(f"[{vp.name}] skip: no tracks table ({tp})")
+                continue
+            df = _load_tracks(Path(tp))
+            store = LabelStore.from_tracks(
+                str(vp), df, skeleton=get_skeleton(cfg), crop_size=cfg.crop_size,
+                n=args.n, strategy=args.strategy, seed=args.seed,
+                seed_ellipse=not args.no_seed_ellipse)
+            print(f"[{vp.name}] sampled {len(store)} frames ({args.strategy}) from {tp}")
+
+        print(f"[{vp.name}] extracting crops (+/-{context} context frames per sample)…")
+        crops = extract_label_crops(vp, store.frames, store.crop_size,
+                                    pad=cfg.crop_pad_mode, context=context, show_progress=True)
+        colors = resolve_node_colors(store.skeleton.nodes, getattr(cfg, "pose_node_colors", ""))
+        LabelApp(store, crops, save_path, zoom=args.zoom, node_colors=colors).run()
     return 0
 
 
