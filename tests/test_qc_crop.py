@@ -62,12 +62,16 @@ def test_render_overlay_crop_roi_dims(tmp_path):
     cap = cv2.VideoCapture(str(p)); w0 = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)); cap.release()
     assert w0 == 200
 
-    p2, _ = render_overlay(video, _tracks(), cfg, tmp_path / "roi.mp4", crop_roi="r0")
+    # Cropped overlays scale the source region UP to crop_output_size (square),
+    # independent of the source window — so annotations stay crisp.
+    p2, _ = render_overlay(video, _tracks(), cfg, tmp_path / "roi.mp4",
+                           crop_roi="r0", crop_output_size=160)
     cap = cv2.VideoCapture(str(p2))
     cw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)); ch = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)); cap.release()
-    assert (cw, ch) == (80, 80)                          # 2*r at downscale 1
+    assert (cw, ch) == (160, 160)
 
-    p3, _ = render_overlay(video, _tracks(), cfg, tmp_path / "foll.mp4", follow="r0", follow_size=64)
+    p3, _ = render_overlay(video, _tracks(), cfg, tmp_path / "foll.mp4",
+                           follow="r0", follow_size=64, crop_output_size=160)
     cap = cv2.VideoCapture(str(p3))
-    fw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)); cap.release()
-    assert fw == 64                                      # follow window size
+    fw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)); fh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)); cap.release()
+    assert (fw, fh) == (160, 160)                        # output size, not the 64px window

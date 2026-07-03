@@ -83,6 +83,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help="Crop the QC overlay to a window following a track: 'ROI' or 'ROI:track_id'.")
     ap.add_argument("--follow-size", type=int, default=256,
                     help="Follow-window size in full-res px (default 256).")
+    ap.add_argument("--crop-size", type=int, default=0,
+                    help="Output px (square) for a cropped QC overlay (default from config: 800).")
     ap.add_argument("--crops", action="store_true",
                     help="Also export centroid-centered crops (A5).")
     ap.add_argument("--pose", action="store_true",
@@ -171,7 +173,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         res = run_qc(video, df, cfg, qc_dir, overlay=True,
                      max_frames=args.qc_max_frames, show_progress=True,
                      background=bg_img, pose_df=getattr(session, "pose_dataframe", None),
-                     crop_roi=args.crop_roi, follow=args.follow, follow_size=args.follow_size)
+                     crop_roi=args.crop_roi, follow=args.follow, follow_size=args.follow_size,
+                     crop_output_size=args.crop_size)
         ok(f"QC → {qc_dir}" + (f" (overlay {res['overlay_frames']} frames)"
                                if res.get("overlay_path") else " (overlay skipped)"))
         if res.get("report_path"):

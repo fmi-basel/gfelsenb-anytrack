@@ -176,14 +176,19 @@ def plot_pose_confidence(pose_df: pd.DataFrame, cfg, out_dir: Path) -> List[Path
     return [path]
 
 
-def prepare_pose_overlay(pose_df: pd.DataFrame, skeleton, cfg, sx: float, sy: float) -> Dict[str, Any]:
-    """Precompute per-frame scaled keypoints + colors/edges for the overlay."""
+def prepare_pose_overlay(pose_df: pd.DataFrame, skeleton, cfg) -> Dict[str, Any]:
+    """Precompute per-frame **full-res** keypoints + colors/edges for the overlay.
+
+    Coordinates are kept in full-frame pixels; the overlay applies its own
+    transform (``tf``) when drawing, so the same prep works at any output scale
+    or crop.
+    """
     from .labeling import resolve_node_colors
     nodes = list(skeleton.nodes)
     hexc = resolve_node_colors(nodes, getattr(cfg, "pose_node_colors", ""))
     by_frame: Dict[int, List[Dict[str, tuple]]] = {}
     for (f, _roi, _tid), g in pose_df.groupby(["frame", "roi", "track_id"]):
-        inst = {r.keypoint: (r.x_full * sx, r.y_full * sy, r.score)
+        inst = {r.keypoint: (r.x_full, r.y_full, r.score)
                 for r in g.itertuples(index=False)}
         by_frame.setdefault(int(f), []).append(inst)
     return {
@@ -195,8 +200,11 @@ def prepare_pose_overlay(pose_df: pd.DataFrame, skeleton, cfg, sx: float, sy: fl
     }
 
 
-def draw_pose(frame, fidx: int, prep: Dict[str, Any], thickness: int = 1, radius: int = 3) -> None:
-    """Draw the skeleton for all instances at ``fidx`` onto ``frame`` (in place)."""
+def draw_pose(frame, fidx: int, prep: Dict[str, Any], tf, thickness: int = 1, radius: int = 3) -> None:
+    """Draw the skeleton for all instances at ``fidx`` onto ``frame`` (in place).
+
+    ``tf(x_full, y_full) -> (px, py)`` maps full-frame coords into the canvas.
+    """
     import cv2
     insts = prep["by_frame"].get(int(fidx))
     if not insts:
@@ -207,9 +215,10 @@ def draw_pose(frame, fidx: int, prep: Dict[str, Any], thickness: int = 1, radius
             pa, pb = inst.get(nodes[ai]), inst.get(nodes[bi])
             if (pa and pb and pa[2] >= cmin and pb[2] >= cmin
                     and np.isfinite(pa[0]) and np.isfinite(pb[0])):
-                cv2.line(frame, (int(pa[0]), int(pa[1])), (int(pb[0]), int(pb[1])),
-                         (210, 210, 210), thickness, cv2.LINE_AA)
+                ax, ay = tf(pa[0], pa[1])
+                bx, by = tf(pb[0], pb[1])
+                cv2.line(frame, (ax, ay), (bx, by), (210, 210, 210), thickness, cv2.LINE_AA)
         for name, (x, y, s) in inst.items():
             if s >= cmin and np.isfinite(x) and np.isfinite(y):
-                cv2.circle(frame, (int(x), int(y)), radius,
+                cv2.circle(frame, tf(x, y), radius,
                            prep["node_bgr"].get(name, (255, 255, 255)), -1, cv2.LINE_AA)

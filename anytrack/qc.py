@@ -585,6 +585,7 @@ def render_overlay(
     crop_roi: Optional[str] = None,
     follow: Optional[str] = None,
     follow_size: int = 256,
+    crop_output_size: int = 0,
 ) -> Tuple[Optional[Path], int]:
     """Burn tracking annotations onto the source video.
 
@@ -624,37 +625,32 @@ def render_overlay(
     names = [r.name for r in rois] + [str(n) for n in flagged.get("roi", pd.Series(dtype=str)).unique()]
     colors = roi_color_map(names)
 
-    # Precompute annotation geometry at the DOWNSCALED resolution.
-    rois_s = [(str(r.name), int(r.cx * sx), int(r.cy * sy), max(1, int(r.r * sx)),
-               colors.get(str(r.name), (90, 90, 90))) for r in rois]
+    # Annotation geometry is kept in FULL-RES coords; a per-frame transform maps
+    # it into the output canvas. For crops we scale the source region UP to the
+    # output size *before* drawing, so the skeleton/labels stay crisp.
+    rois_full = [(str(r.name), float(r.cx), float(r.cy), float(r.r),
+                  colors.get(str(r.name), (90, 90, 90))) for r in rois]
     frame_groups = {int(f): g for f, g in flagged.groupby("frame")}
     trails: Dict[Any, Tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
     for (rn, tid), g in flagged.groupby(["roi", "track_id"]):
         gg = g.sort_values("frame")
-        trails[(rn, tid)] = (gg["frame"].to_numpy(),
-                             gg["x"].to_numpy() * sx, gg["y"].to_numpy() * sy)
-    th = max(1, round(2 * sx))
-    dot = max(2, round(4 * sx))
-    ring = max(4, round(8 * sx))
+        trails[(rn, tid)] = (gg["frame"].to_numpy(), gg["x"].to_numpy(), gg["y"].to_numpy())
     F = cv2.FONT_HERSHEY_SIMPLEX
 
-    # Optional pose skeleton overlay (Milestone B5).
     pose_prep = None
     if pose_df is not None and not pose_df.empty:
         from .pose.qc_pose import prepare_pose_overlay, draw_pose
         from .pose.skeleton import get_skeleton
-        pose_prep = prepare_pose_overlay(pose_df, get_skeleton(cfg), cfg, sx, sy)
-        pose_radius = max(2, round(3 * sx))
+        pose_prep = prepare_pose_overlay(pose_df, get_skeleton(cfg), cfg)
 
-    # Optional crop of the output: static ROI bbox, or a window that follows a
-    # track's centroid. Annotations are drawn on the full downscaled frame, then
-    # this window is cut out; even dims are required for H.264.
-    crop_wh = None            # (ow, oh) in downscaled px (constant output size)
-    crop_origin_fn = None     # source_fidx -> (ox, oy) top-left in downscaled px
+    def _even(v, hi=None):
+        v = max(2, int(round(v))); v -= v % 2
+        return min(v, hi - (hi % 2)) if hi else v
 
-    def _even_clamp(v, hi):
-        v = max(2, min(int(v), hi)); return v - (v % 2)
-
+    # --- resolve crop geometry (square, full-res) -> output canvas -------------
+    crop_active = bool(crop_roi or follow)
+    center_fn = None      # source_fidx -> (cx, cy) full-res crop center
+    csize = 0             # full-res square crop side
     if follow:
         fname, _, ftid = str(follow).partition(":")
         fg = flagged[flagged.get("roi", pd.Series(index=flagged.index, dtype=str)).astype(str) == fname]
@@ -665,63 +661,110 @@ def render_overlay(
         fg = fg.dropna(subset=["x", "y"]).sort_values("frame")
         if fg.empty:
             raise ValueError(f"--follow: no track for {follow!r} in the data")
-        ow = _even_clamp(follow_size * sx, w)
-        oh = _even_clamp(follow_size * sy, h)
-        ffr = fg["frame"].to_numpy()
-        fcx = fg["x"].to_numpy() * sx
-        fcy = fg["y"].to_numpy() * sy
+        ffr = fg["frame"].to_numpy(); fcx = fg["x"].to_numpy(); fcy = fg["y"].to_numpy()
+        csize = _even(min(follow_size, src_w, src_h))
 
-        def crop_origin_fn(fidx, ffr=ffr, fcx=fcx, fcy=fcy, ow=ow, oh=oh):
+        def center_fn(fidx, ffr=ffr, fcx=fcx, fcy=fcy):
             j = max(0, min(int(np.searchsorted(ffr, fidx, side="right")) - 1, len(ffr) - 1))
-            ox = int(min(max(0, fcx[j] - ow / 2), w - ow))
-            oy = int(min(max(0, fcy[j] - oh / 2), h - oh))
-            return ox, oy
-        crop_wh = (ow, oh)
+            return float(fcx[j]), float(fcy[j])
     elif crop_roi:
         bbox = _resolve_roi_bbox(str(crop_roi), video, flagged)
         if bbox is None:
             raise ValueError(f"--crop-roi: unknown ROI {crop_roi!r}")
         bx0, by0, bx1, by1 = bbox
-        ox = int(min(max(0, bx0 * sx), w - 2))
-        oy = int(min(max(0, by0 * sy), h - 2))
-        ow = _even_clamp((bx1 - bx0) * sx, w - ox)
-        oh = _even_clamp((by1 - by0) * sy, h - oy)
-        crop_wh = (ow, oh)
-        crop_origin_fn = lambda fidx, ox=ox, oy=oy: (ox, oy)   # noqa: E731
+        ccx, ccy = (bx0 + bx1) / 2.0, (by0 + by1) / 2.0
+        csize = _even(min(max(bx1 - bx0, by1 - by0), src_w, src_h))
+        center_fn = lambda fidx, ccx=ccx, ccy=ccy: (ccx, ccy)   # noqa: E731
 
-    def annotate(frame, fidx):
-        for (nm, cx, cy, rr, col) in rois_s:
-            cv2.circle(frame, (cx, cy), rr, col, th)
-            cv2.putText(frame, nm, (cx - rr, cy - rr - 4), F, 0.5, col, 1, cv2.LINE_AA)
+    def crop_origin(fidx):
+        cx, cy = center_fn(fidx)
+        ox = int(min(max(0, round(cx - csize / 2)), src_w - csize))
+        oy = int(min(max(0, round(cy - csize / 2)), src_h - csize))
+        return ox, oy
+
+    out_size = _even(int(getattr(cfg, "qc_crop_output_size", 800)) if crop_output_size <= 0
+                     else crop_output_size)
+    if crop_active:
+        scl = out_size / csize
+        enc_w = enc_h = out_size
+    else:
+        scl = None
+        enc_w, enc_h = w, h
+
+    mag = scl if crop_active else max(sx, sy)   # annotation size follows magnification
+    th = max(1, round(2 * mag)); dot = max(2, round(4 * mag))
+    ring = max(4, round(8 * mag)); pose_radius = max(2, round(3 * mag))
+
+    def draw(canvas, fidx, ox, oy, scx, scy):
+        """Draw all annotations onto ``canvas`` mapping full-res coords via
+        ``(X-ox)*scx, (Y-oy)*scy``."""
+        def tx(X):
+            return int(round((X - ox) * scx))
+
+        def ty(Y):
+            return int(round((Y - oy) * scy))
+        for (nm, cx, cy, rr, col) in rois_full:
+            cv2.circle(canvas, (tx(cx), ty(cy)), max(1, int(rr * scx)), col, th)
+            cv2.putText(canvas, nm, (tx(cx - rr), ty(cy - rr) - 4), F, 0.5, col, 1, cv2.LINE_AA)
         for (rn, _tid), (fr, xs, ys) in trails.items():
             col = colors.get(str(rn), (0, 180, 180))
             lo = int(np.searchsorted(fr, fidx - trail_len))
             hi = int(np.searchsorted(fr, fidx, side="right"))
             if hi - lo >= 2:
-                pts = np.stack([xs[lo:hi], ys[lo:hi]], axis=1).astype(np.int32)
-                cv2.polylines(frame, [pts], False, col, 1)
+                pts = np.stack([(xs[lo:hi] - ox) * scx, (ys[lo:hi] - oy) * scy], axis=1).astype(np.int32)
+                cv2.polylines(canvas, [pts], False, col, 1)
         rows = frame_groups.get(fidx)
         if rows is not None:
             for _, r in rows.iterrows():
                 col = colors.get(str(r["roi"]), (0, 255, 0))
-                cx, cy = int(r["x"] * sx), int(r["y"] * sy)
-                cv2.circle(frame, (cx, cy), dot, col, -1)
+                cx, cy = tx(r["x"]), ty(r["y"])
+                cv2.circle(canvas, (cx, cy), dot, col, -1)
                 if any(bool(r.get(c, False)) for c in FLAG_COLUMNS):
-                    cv2.circle(frame, (cx, cy), ring, (0, 0, 255), th)
+                    cv2.circle(canvas, (cx, cy), ring, (0, 0, 255), th)
         if pose_prep is not None:
-            draw_pose(frame, fidx, pose_prep, thickness=th, radius=pose_radius)
-        cv2.putText(frame, f"frame {fidx}", (8, 22), F, 0.6, (255, 255, 255), 1)
+            draw_pose(canvas, fidx, pose_prep, lambda X, Y: (tx(X), ty(Y)),
+                      thickness=th, radius=pose_radius)
+        cv2.putText(canvas, f"frame {fidx}", (8, 22), F, 0.6, (255, 255, 255), 1)
 
-    def render_frame(frame, fidx):
-        """Annotate the full downscaled frame, then cut the crop window (if any)."""
-        annotate(frame, fidx)
-        if crop_origin_fn is None:
+    # Per-backend frame transforms (ffmpeg gets a pre-filtered frame; cv2 a full
+    # frame). Crop = scale source region up to out_size, THEN draw.
+    if crop_active:
+        def _crop_scale(frame_full, fidx):
+            ox, oy = crop_origin(fidx)
+            sub = frame_full[oy:oy + csize, ox:ox + csize]
+            canvas = cv2.resize(sub, (out_size, out_size), interpolation=cv2.INTER_LINEAR)
+            draw(canvas, fidx, ox, oy, scl, scl)
+            return canvas
+
+        cv2_transform = _crop_scale
+        if follow:
+            ff_transform = _crop_scale                      # ffmpeg delivers full-res
+        else:
+            def ff_transform(frame, fidx):                  # ffmpeg pre-cropped+scaled
+                ox, oy = crop_origin(fidx)
+                draw(frame, fidx, ox, oy, scl, scl)
+                return frame
+    else:
+        def ff_transform(frame, fidx):                      # ffmpeg pre-scaled to (w,h)
+            draw(frame, fidx, 0, 0, sx, sy)
             return frame
-        ow, oh = crop_wh
-        ox, oy = crop_origin_fn(fidx)
-        return np.ascontiguousarray(frame[oy:oy + oh, ox:ox + ow])
 
-    enc_w, enc_h = crop_wh if crop_wh is not None else (w, h)
+        def cv2_transform(frame, fidx):
+            if (frame.shape[1], frame.shape[0]) != (w, h):
+                frame = cv2.resize(frame, (w, h), interpolation=cv2.INTER_AREA)
+            draw(frame, fidx, 0, 0, sx, sy)
+            return frame
+
+    # ffmpeg decode filter + delivered size per mode.
+    fs = f"framestep=step={stride}," if stride > 1 else ""
+    if not crop_active:
+        dec_vf = f"{fs}scale={w}:{h}"; dec_w, dec_h = w, h
+    elif follow:
+        dec_vf = f"framestep=step={stride}" if stride > 1 else ""; dec_w, dec_h = src_w, src_h
+    else:
+        ox0, oy0 = crop_origin(0)
+        dec_vf = f"{fs}crop={csize}:{csize}:{ox0}:{oy0},scale={out_size}:{out_size}"
+        dec_w, dec_h = out_size, out_size
 
     pbar = None
     if show_progress:
@@ -749,18 +792,18 @@ def render_overlay(
             kinds.append("sw")
             for kind in kinds:
                 try:
-                    written = _overlay_ffmpeg(video.video_path, out_path, w, h, fps, crf,
-                                              max_frames, render_frame, pbar,
+                    written = _overlay_ffmpeg(video.video_path, out_path, dec_w, dec_h, fps, crf,
+                                              max_frames, ff_transform, pbar,
                                               stride=stride, encoder=kind, bitrate=hw_bitrate,
-                                              enc_w=enc_w, enc_h=enc_h)
+                                              enc_w=enc_w, enc_h=enc_h, dec_vf=dec_vf)
                     if written > 0:
                         break
                 except Exception:
                     written = 0
                     continue
         if written <= 0:
-            written = _overlay_cv2(video.video_path, out_path, w, h, fps,
-                                   max_frames, render_frame, pbar, stride=stride,
+            written = _overlay_cv2(video.video_path, out_path, fps, max_frames,
+                                   cv2_transform, pbar, stride=stride,
                                    enc_w=enc_w, enc_h=enc_h)
     finally:
         if pbar is not None:
@@ -787,18 +830,20 @@ def _videotoolbox_available() -> bool:
     return _VT_AVAILABLE
 
 
-def _overlay_ffmpeg(video_path, out_path, w, h, fps, crf, max_frames, annotate, pbar,
+def _overlay_ffmpeg(video_path, out_path, dec_w, dec_h, fps, crf, max_frames, annotate, pbar,
                     stride: int = 1, encoder: str = "sw", bitrate: str = "6M",
-                    enc_w: Optional[int] = None, enc_h: Optional[int] = None) -> int:
-    """Decode (scaled, optionally frame-stepped) and H.264-encode the annotated
-    overlay through FFmpeg pipes. ``encoder`` is "hw" (VideoToolbox) or "sw"
-    (libx264). With ``stride>1`` only every Nth source frame is rendered, so the
-    output plays ~stride× faster. ``annotate(frame, fidx)`` may return a
-    (cropped) frame to encode; ``enc_w/enc_h`` are its dims (default ``w/h``)."""
+                    enc_w: Optional[int] = None, enc_h: Optional[int] = None,
+                    dec_vf: str = "") -> int:
+    """Decode (via ``dec_vf``, delivering ``dec_w×dec_h`` frames) and H.264-encode
+    the annotated overlay through FFmpeg pipes. ``encoder`` is "hw" (VideoToolbox)
+    or "sw" (libx264). ``annotate(frame, fidx)`` returns the frame to encode
+    (``enc_w×enc_h``; defaults to ``dec_w/dec_h``)."""
     ffmpeg = get_ffmpeg_path()
-    enc_w = int(enc_w or w); enc_h = int(enc_h or h)
-    vf = f"scale={w}:{h}" if stride <= 1 else f"framestep=step={stride},scale={w}:{h}"
-    dec_cmd = [ffmpeg, "-v", "error", "-i", str(video_path), "-vf", vf, "-vsync", "vfr"]
+    enc_w = int(enc_w or dec_w); enc_h = int(enc_h or dec_h)
+    dec_cmd = [ffmpeg, "-v", "error", "-i", str(video_path)]
+    if dec_vf:
+        dec_cmd += ["-vf", dec_vf]
+    dec_cmd += ["-vsync", "vfr"]
     if max_frames:
         dec_cmd += ["-frames:v", str(int(max_frames))]
     dec_cmd += ["-f", "rawvideo", "-pix_fmt", "bgr24", "-"]
@@ -811,7 +856,7 @@ def _overlay_ffmpeg(video_path, out_path, w, h, fps, crf, max_frames, annotate, 
                "-s", f"{enc_w}x{enc_h}", "-r", f"{fps:.6f}", "-i", "-",
                *venc, "-pix_fmt", "yuv420p", str(out_path)]
 
-    frame_bytes = w * h * 3
+    frame_bytes = dec_w * dec_h * 3
     dec = subprocess.Popen(dec_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     enc = subprocess.Popen(enc_cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
                            stderr=subprocess.DEVNULL)
@@ -821,7 +866,7 @@ def _overlay_ffmpeg(video_path, out_path, w, h, fps, crf, max_frames, annotate, 
             buf = dec.stdout.read(frame_bytes)
             if len(buf) < frame_bytes:
                 break
-            frame = np.frombuffer(buf, np.uint8).reshape(h, w, 3).copy()
+            frame = np.frombuffer(buf, np.uint8).reshape(dec_h, dec_w, 3).copy()
             out = annotate(frame, written * stride)  # k-th kept frame == source frame k*stride
             if out is None:
                 out = frame
@@ -848,15 +893,15 @@ def _overlay_ffmpeg(video_path, out_path, w, h, fps, crf, max_frames, annotate, 
     return written
 
 
-def _overlay_cv2(video_path, out_path, w, h, fps, max_frames, annotate, pbar, stride: int = 1,
-                 enc_w: Optional[int] = None, enc_h: Optional[int] = None) -> int:
-    """Fallback: cv2 decode + resize + annotate + mp4v write (no FFmpeg).
-    ``annotate`` may return a (cropped) frame; ``enc_w/enc_h`` are its dims."""
+def _overlay_cv2(video_path, out_path, fps, max_frames, transform, pbar, stride: int = 1,
+                 enc_w: int = 0, enc_h: int = 0) -> int:
+    """Fallback: cv2 decode (full frame) + ``transform`` + mp4v write (no FFmpeg).
+    ``transform(full_frame, fidx)`` returns the ``enc_w×enc_h`` frame to write."""
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         return 0
-    enc_w = int(enc_w or w); enc_h = int(enc_h or h)
-    writer = cv2.VideoWriter(str(out_path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (enc_w, enc_h))
+    writer = cv2.VideoWriter(str(out_path), cv2.VideoWriter_fourcc(*"mp4v"),
+                             fps, (int(enc_w), int(enc_h)))
     if not writer.isOpened():
         cap.release()
         return 0
@@ -871,11 +916,7 @@ def _overlay_cv2(video_path, out_path, w, h, fps, max_frames, annotate, pbar, st
             continue
         if frame.ndim == 2:
             frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
-        if (frame.shape[1], frame.shape[0]) != (w, h):
-            frame = cv2.resize(frame, (w, h), interpolation=cv2.INTER_AREA)
-        out = annotate(frame, fidx)
-        if out is None:
-            out = frame
+        out = np.ascontiguousarray(transform(frame, fidx))
         writer.write(out)
         written += 1
         fidx += 1
@@ -902,6 +943,7 @@ def run_qc(
     crop_roi: Optional[str] = None,
     follow: Optional[str] = None,
     follow_size: int = 256,
+    crop_output_size: int = 0,
 ) -> Dict[str, Any]:
     """Produce all QC artifacts into ``out_dir`` and return a manifest dict.
 
@@ -968,6 +1010,7 @@ def run_qc(
             video, df, cfg, out_dir / "qc_overlay.mp4",
             max_frames=max_frames, show_progress=show_progress, pose_df=pose_df,
             crop_roi=crop_roi, follow=follow, follow_size=follow_size,
+            crop_output_size=crop_output_size,
         )
 
     def _first(paths):
@@ -1037,6 +1080,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help="Crop to a moving window that follows a track: 'ROI' or 'ROI:track_id'.")
     ap.add_argument("--follow-size", type=int, default=256,
                     help="Follow-window size in full-res px (default 256).")
+    ap.add_argument("--crop-size", type=int, default=0,
+                    help="Output px (square) for a cropped overlay (default from config: 800).")
     args = ap.parse_args(argv)
 
     cfg = load_config()
@@ -1070,7 +1115,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     out_dir = args.out_dir or (Path(getattr(cfg, "output_dir", "") or ".") / "qc")
     res = run_qc(video, df, cfg, out_dir, overlay=not args.no_overlay,
                  max_frames=args.max_frames, show_progress=True, pose_df=pose_df,
-                 crop_roi=args.crop_roi, follow=args.follow, follow_size=args.follow_size)
+                 crop_roi=args.crop_roi, follow=args.follow, follow_size=args.follow_size,
+                 crop_output_size=args.crop_size)
 
     print(f"QC written to {out_dir}")
     print(f"  summary: {res['summary_path']}")

@@ -219,7 +219,7 @@ const MODULES = [
   {mod:"run.py",           resp:"Headless full-pipeline CLI: anytrack-run (ROI detect → track → write to --output; --qc/--crops chaining). tqdm progress bars + formatted phase output via cli_progress.py (NEW).", status:"done"},
   {mod:"gui/app.py",       resp:"Debug window now renders from detector.debug_frame (A7). Pose overlay (B); optional in-GUI crop-export menu deferred (CLI exists).", status:"partial"},
   {mod:"pose/ (skeleton, engine, pipeline, labeling, label_gui, train, engine_sleap, infer, qc_pose)", resp:"B0-B5 done: Skeleton+PoseEngine+Mock+run_pose; anytrack-label GUI + JSON store + .slp; anytrack-train (B3); SleapNNEngine/Predictor (B4); pose stage infer.py + run_pose_stage + session + anytrack-run --pose; qc_pose.py skeleton overlay + confidence plot + flags; GUI pose overlay (B5). Validated end-to-end on the real clip. Pending: B6 benchmark.", status:"done"},
-  {mod:"qc.py",            resp:"Background PNG + ROI-colored overlay (+ pose skeleton overlay, croppable to a ROI or a track-following fly-cam) + distributions/timeseries/kinematics/occupancy/coverage + pose confidence + flagged-frame montage + flags/summary (+ pose flags) + qc_report.html + anytrack-qc CLI (--pose, --crop-roi, --follow).", status:"done"},
+  {mod:"qc.py",            resp:"Background PNG + ROI-colored overlay (+ pose skeleton overlay; croppable to a ROI or a track-following fly-cam — source region scaled up to qc_crop_output_size=800² BEFORE drawing so annotations stay crisp) + distributions/timeseries/kinematics/occupancy/coverage + pose confidence + flagged-frame montage + flags/summary (+ pose flags) + qc_report.html + anytrack-qc CLI (--pose, --crop-roi, --follow, --crop-size).", status:"done"},
 ];
 
 const MILESTONE_A = [

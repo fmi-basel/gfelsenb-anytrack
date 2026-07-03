@@ -137,6 +137,7 @@ class AnyTrackConfig:
     # fixed bitrate), so HW defaults OFF. Turn on for full-framerate overlays.
     qc_overlay_hw: bool = False         # use hardware H.264 encode (VideoToolbox) for the overlay
     qc_overlay_hw_bitrate: str = "6M"   # target bitrate for the hardware encoder
+    qc_crop_output_size: int = 800      # output px (square) for a cropped overlay (--crop-roi/--follow)
 
     # Local staging (copy source video off slow/network storage before processing).
     # Default off: benchmarks showed the network wasn't the bottleneck (preprocessing
