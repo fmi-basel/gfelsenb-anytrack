@@ -96,9 +96,18 @@ def _run_one(video_path, idx: int, n: int, *, args, cfg, single, group=None) -> 
     if not batch:
         ok(f"{len(video.rois)} ROI(s): {', '.join(r.name for r in video.rois)}")
 
+    # Opt-in: reuse the full-frame background per ROI (crop + downscale) so workers
+    # skip rebuilding a GMM. OFF by default — the arena-blurred full-frame bg can
+    # destabilize ambiguous arenas (measured 30+px divergence on one), and the
+    # speed payoff is <2%. Workers otherwise use their own per-worker/first-N GMM.
+    roi_bgs = None
+    if bg_img is not None and getattr(cfg, "bg_reuse_for_roi", False):
+        from .preprocess import crop_roi_backgrounds
+        roi_bgs = crop_roi_backgrounds(bg_img, video.rois, cfg.roi_downscale)
+
     t0 = time.perf_counter()
     session = TrackingSession(cfg=cfg, video=video)
-    df = session.run(progress_hook=progress)
+    df = session.run(progress_hook=progress, roi_backgrounds=roi_bgs)
     if not batch:
         progress.close()
     dt = time.perf_counter() - t0

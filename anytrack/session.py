@@ -20,7 +20,8 @@ class TrackingSession:
     dataframe: Optional[pd.DataFrame] = None
     pose_dataframe: Optional[pd.DataFrame] = None
 
-    def run(self, progress_hook=None, cancel_event=None, progress_every: int = 1) -> pd.DataFrame:
+    def run(self, progress_hook=None, cancel_event=None, progress_every: int = 1,
+            roi_backgrounds=None) -> pd.DataFrame:
         import dataclasses
         from .staging import stage_video, unstage
 
@@ -37,6 +38,7 @@ class TrackingSession:
                     self.cfg,
                     progress_hook=progress_hook,
                     cleanup=self.cfg.cleanup_roi_videos,
+                    roi_backgrounds=roi_backgrounds,
                 )
             else:
                 # Legacy mode: single-pass tracking

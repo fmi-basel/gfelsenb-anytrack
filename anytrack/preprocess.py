@@ -115,6 +115,32 @@ def roi_crop_geometry(roi: CircleROI, downscale: int) -> Tuple[int, int, int, in
     return crop_size, x0, y0, scaled_size
 
 
+def crop_roi_backgrounds(bg_full, rois, downscale):
+    """Per-ROI backgrounds cropped from a full-frame background (Phase 5 reuse).
+
+    Uses the same :func:`roi_crop_geometry` as extraction so each crop lines up
+    with the tracker's frames, letting workers skip rebuilding a GMM and — for the
+    streaming path — giving a uniformly-sampled background instead of the
+    first-N-frames one. Returns ``{roi_name: uint8 (scaled_size, scaled_size)}``.
+    """
+    import numpy as np
+    import cv2
+
+    out = {}
+    H, W = bg_full.shape[:2]
+    for roi in rois:
+        crop_size, x0, y0, scaled_size = roi_crop_geometry(roi, downscale)
+        crop = bg_full[y0:min(y0 + crop_size, H), x0:min(x0 + crop_size, W)]
+        if crop.shape[0] != crop_size or crop.shape[1] != crop_size:  # ROI off-frame (rare)
+            padded = np.zeros((crop_size, crop_size), dtype=bg_full.dtype)
+            padded[:crop.shape[0], :crop.shape[1]] = crop
+            crop = padded
+        if scaled_size != crop_size:
+            crop = cv2.resize(crop, (scaled_size, scaled_size), interpolation=cv2.INTER_AREA)
+        out[roi.name] = np.ascontiguousarray(crop)
+    return out
+
+
 def build_stream_command(input_video, rois, downscale, fifo_paths, hwaccel_flags=None):
     """Build the decode-once FFmpeg command for the streaming path.
 

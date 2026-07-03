@@ -82,6 +82,7 @@ class AnyTrackConfig:
     cleanup_roi_videos: bool = True  # Delete temp ROI videos after tracking
     cv_threads_per_worker: int = 1  # OpenCV threads inside each tracking worker (0 = leave default)
     roi_stream_decode: bool = True  # Decode once and pipe raw gray crops to trackers (FIFO); else encode ROI mp4s
+    bg_reuse_for_roi: bool = False  # Reuse the full-frame bg per ROI instead of per-worker/first-N (off: can destabilize ambiguous arenas)
 
     # Background adaptation (opt-in). Off by default so tracking output is
     # unchanged vs. the static GMM; enable for slowly drifting illumination.
