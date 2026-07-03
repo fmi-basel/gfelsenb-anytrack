@@ -118,7 +118,8 @@
   <div class="meta">
     <span>Last updated: <strong id="updated"></strong></span>
     <span id="progressText"></span>
-    <span>Tests: <strong>36 unit passing</strong> (accuracy/perf need a video)</span>
+    <span>Tests: <strong>117 passing</strong> (accuracy/perf need a video)</span>
+    <span><a href="tutorial.html">Tutorial &amp; usage guide →</a></span>
   </div>
   <div class="meter" id="meter" aria-label="Milestone A progress"></div>
 
@@ -167,7 +168,7 @@
    SINGLE SOURCE OF TRUTH — update these arrays on every code change.
    status: 'done' | 'partial' | 'planned'
    ===================================================================== */
-const LAST_UPDATED = "2026-07-02";
+const LAST_UPDATED = "2026-07-03";
 
 const STATUS = {
   done:    {label:"Implemented", icon:"✓", cls:"s-done",    node:"done",    color:"var(--good)"},
@@ -297,10 +298,13 @@ $("#notes").innerHTML = "<ul style='margin:0;padding-left:18px'>"+NOTES.map(n=>`
   const total=MILESTONE_A.length;
   const seg=(k)=>`<i style="flex:${counts[k]};background:${STATUS[k].color}" title="${counts[k]} ${STATUS[k].label}"></i>`;
   $("#meter").innerHTML = ["done","partial","planned"].filter(k=>counts[k]>0).map(seg).join("");
+  const cb={done:0,partial:0,planned:0}; MILESTONE_B.forEach(i=>cb[i.status]++);
   $("#progressText").innerHTML =
-    `Milestone A: <strong>${counts.done}/${total} implemented</strong>`+
+    `Milestone A: <strong>${counts.done}/${total} done</strong>`+
     (counts.partial?`, ${counts.partial} partial`:``)+
-    (counts.planned?`, ${counts.planned} planned`:``)+` · Milestone B: planned`;
+    (counts.planned?`, ${counts.planned} planned`:``)+
+    ` · Milestone B: <strong>${cb.done}/${MILESTONE_B.length} done</strong>`+
+    (cb.partial?`, ${cb.partial} partial`:``)+(cb.planned?`, ${cb.planned} planned`:``);
 })();
 
 // theme toggle: auto -> light -> dark -> auto
