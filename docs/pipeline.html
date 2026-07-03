@@ -211,7 +211,7 @@ const MODULES = [
   {mod:"coordinates.py",   resp:"Coordinate conversions + add_roi_local_columns (NEW).", status:"done"},
   {mod:"cropper.py",       resp:"Dynamic centroid crops, batcher, crop-export (NEW).", status:"done"},
   {mod:"writer.py",        resp:"Unified parquet/CSV output + streaming (NEW).", status:"done"},
-  {mod:"benchmark.py",     resp:"FPS + per-stage timing (--stages) + ensure_rois + CLI (NEW, promoted).", status:"done"},
+  {mod:"benchmark.py",     resp:"FPS + per-stage timing (--stages) + pose crops/s (--pose: device×batch×every_n sweep + decode floor, B6) + ensure_rois + CLI.", status:"done"},
   {mod:"background.py",    resp:"Static per-pixel GMM (vectorized numpy EM, ~12×) + BackgroundState opt-in drift correction/protection (A4).", status:"done"},
   {mod:"tracking.py / tracking_fast.py", resp:"Now thin callers of detector/tracker; legacy cv_angle_deg bug fixed.", status:"done"},
   {mod:"preprocess.py",    resp:"FFmpeg ROI extraction — single-pass (decode once, split→4 crops, libx264) + sequential-HW fallback.", status:"done"},
@@ -241,7 +241,7 @@ const MILESTONE_B = [
   {code:"B3", t:"training (sleap-nn via sleap-io)", status:"done", n:"anytrack-train (pose/train.py): label-store .json → .slp → sleap_nn.train.train() centered-instance UNet, crop_size=96, ensure_grayscale, aug=brightness/contrast+rotation/translate, MPS. Validated: 30-frame smoke train → best.ckpt. sleap-nn 0.3.0 / sleap-io 0.8.0 / torch 2.12 (manual install; py>=3.11). Fixed sio.Skeleton in-place-mutation NaN-export bug."},
   {code:"B4", t:"SleapNNEngine + optional deps", status:"done", n:"pose/engine_sleap.py: load via sleap_nn.load_models([dir],device=mps) → Predictor; inference = predict_labels(sio.Labels), NOT crop-feeding (internal layers are wrappers, not nn.Modules — found by inspecting the installed pkg). build_engine factory (mock fallback when no model). Validated: build_engine→predict_labels on trained model on MPS. heatmaps_to_keypoints kept as tested generic util."},
   {code:"B5", t:"session + CLI + QC + GUI", status:"done", n:"pose stage (pose/infer.py: tracks df → sio.Labels @ tracker centroids → Predictor.predict → long pose df, nearest-centroid ROI matching); run_pose_stage dispatcher; session (cfg.pose_enabled → session.pose_dataframe); anytrack-run --pose/--pose-model/--pose-device/--pose-every-n → <stem>_pose.parquet. QC (pose/qc_pose.py): skeleton overlay on qc_overlay.mp4, keypoint-confidence-over-time plot, per-instance flags (low-conf/missing/wing-swap/head-tail) → qc_pose_flags.parquet + report; anytrack-qc --pose. GUI: node-colored skeleton overlay in the preview. Validated end-to-end on the real clip with fly5_v1 (median score 0.98)."},
-  {code:"B6", t:"crops/s benchmark", status:"planned", n:"Every-frame vs sparse; batch-size sweep."},
+  {code:"B6", t:"crops/s benchmark", status:"done", n:"benchmark.benchmark_pose + anytrack-bench --pose: crops/s (instances/s) + pose-fps across device (mps/cpu) × batch × every_n, a decode+crop floor (I/O vs inference share), and full-video pose-time extrapolation. TOML report to tests/reports/."},
 ];
 
 const NOTES = [

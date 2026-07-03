@@ -254,6 +254,129 @@ def benchmark_stages(video, cfg, n_frames: int = 2000) -> dict:
     }
 
 
+def benchmark_pose(
+    video,
+    df,
+    cfg: AnyTrackConfig,
+    *,
+    max_frames: int = 150,
+    devices=("mps",),
+    batch_values=(4,),
+    every_n_values=(1,),
+    verbose: bool = True,
+) -> dict:
+    """Time the sleap-nn pose stage across device × batch × every_n (Milestone B6).
+
+    Measures **crops/s** (instances/s) and pose-frames/s on ``max_frames`` pose
+    frames per run, plus a **decode+crop floor** (``iter_crop_batches`` with no
+    model) so the video-I/O share of the cost is visible. Each run extrapolates
+    the full-video pose time at that ``every_n``. Requires sleap-nn + a trained
+    model (``cfg.sleap_model_path``).
+    """
+    import dataclasses
+    import time as _t
+    from .pose import build_engine, get_skeleton
+    from .pose.infer import run_pose_sleap
+    from .cropper import iter_crop_batches
+
+    valid = df.dropna(subset=[c for c in ("x", "y") if c in df.columns]) \
+        if {"x", "y"} & set(df.columns) else df
+    all_frames = sorted(int(f) for f in valid["frame"].unique())
+    if not all_frames:
+        raise ValueError("no valid frames in tracks for the pose benchmark")
+
+    def capped(every_n):
+        sel = [f for f in all_frames if f % every_n == 0][:max_frames]
+        return valid[valid["frame"].isin(sel)].copy()
+
+    # decode+crop floor: read + crop the first max_frames frames, no model.
+    cdf0 = capped(1)
+    cfg0 = dataclasses.replace(cfg, pose_every_n=1)
+    n_dec, t0 = 0, _t.perf_counter()
+    for _crops, metas in iter_crop_batches(video, cdf0, cfg0):
+        n_dec += len(metas)
+    dec_s = _t.perf_counter() - t0
+    decode_floor = {"n_instances": n_dec, "seconds": round(dec_s, 2),
+                    "crops_s": round(n_dec / dec_s, 1) if dec_s > 0 else 0.0}
+    if verbose:
+        print(f"  [pose] decode+crop floor: {decode_floor['crops_s']} crops/s "
+              f"({n_dec} crops, {dec_s:.1f}s)")
+
+    total_frames_full = int(getattr(video, "frame_count", 0) or (all_frames[-1] + 1))
+    runs = []
+    for dev in devices:
+        cfg_dev = dataclasses.replace(cfg, pose_device=dev, pose_backend="sleap-nn")
+        try:
+            eng = build_engine(cfg_dev)
+        except Exception as e:  # noqa: BLE001 - a device may be unavailable
+            if verbose:
+                print(f"  [pose] device={dev}: engine load failed ({type(e).__name__}); skipping")
+            continue
+        for bs in batch_values:
+            try:
+                if getattr(eng, "predictor", None) is not None:
+                    eng.predictor.batch_size = int(bs)
+            except Exception:
+                pass
+            for en in every_n_values:
+                cdf = capped(en)
+                cfg_run = dataclasses.replace(cfg_dev, pose_every_n=1)  # cdf already sub-sampled
+                t0 = _t.perf_counter()
+                _ = run_pose_sleap(video, cdf, cfg_run, eng)
+                secs = _t.perf_counter() - t0
+                n_frames = int(cdf["frame"].nunique())
+                n_inst = int(len(cdf))
+                frames_s = n_frames / secs if secs > 0 else 0.0
+                crops_s = n_inst / secs if secs > 0 else 0.0
+                full_frames = (total_frames_full + en - 1) // en
+                full_s = full_frames / frames_s if frames_s > 0 else 0.0
+                run = {"device": dev, "batch": int(bs), "every_n": int(en),
+                       "n_frames": n_frames, "n_instances": n_inst, "seconds": round(secs, 2),
+                       "frames_s": round(frames_s, 1), "crops_s": round(crops_s, 1),
+                       "full_video_pose_s": round(full_s, 1)}
+                runs.append(run)
+                if verbose:
+                    print(f"  [pose] device={dev} batch={bs} every_n={en}: "
+                          f"{crops_s:.1f} crops/s ({frames_s:.1f} fps, {secs:.1f}s, {n_frames} frames) "
+                          f"→ full video ~{full_s:.0f}s")
+
+    best = max(runs, key=lambda r: r["crops_s"], default=None)
+    return {"decode_floor": decode_floor, "runs": runs, "best": best,
+            "max_frames": max_frames, "n_keypoints": get_skeleton(cfg).n_nodes,
+            "total_frames_full": total_frames_full}
+
+
+def write_pose_report(results: dict, output_path: Path, video, cfg, git_commit: Optional[str] = None):
+    """Write the pose benchmark (decode floor + per-run table) to TOML."""
+    rois = getattr(video, "rois", []) or []
+    lines = ["[metadata]", f'timestamp = "{datetime.now().isoformat()}"']
+    if git_commit:
+        lines.append(f'git_commit = "{git_commit}"')
+    lines += [
+        "", "[video]",
+        f'path = "{Path(video.video_path).name}"',
+        f'resolution = "{getattr(video, "width", 0)}x{getattr(video, "height", 0)}"',
+        f"n_rois = {len(rois)}",
+        f"total_frames = {getattr(video, 'frame_count', 0)}",
+        "", "[pose_benchmark]",
+        f'model = "{cfg.sleap_model_path}"',
+        f"max_frames = {results['max_frames']}",
+        f"n_keypoints = {results['n_keypoints']}",
+        f"decode_floor_crops_s = {results['decode_floor']['crops_s']}",
+    ]
+    if results.get("best"):
+        b = results["best"]
+        lines.append(f'best = "{b["crops_s"]} crops/s @ device={b["device"]} batch={b["batch"]}"')
+    lines.append("")
+    for r in results["runs"]:
+        lines.append("[[run]]")
+        for k, v in r.items():
+            lines.append(f'{k} = "{v}"' if isinstance(v, str) else f"{k} = {v}")
+        lines.append("")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("\n".join(lines))
+
+
 def _git_commit() -> Optional[str]:
     """Short HEAD hash (with a ``-dirty`` suffix if the tree has local changes)."""
     try:
@@ -281,6 +404,17 @@ def main(argv=None):
                    help="Per-stage breakdown (preprocess / bg-build / pure tracking) instead of FPS runs")
     p.add_argument("--no-stage", action="store_true", help="Disable local staging for this run")
     p.add_argument("--report-dir", default="tests/reports")
+    # Pose benchmark (B6)
+    p.add_argument("--pose", action="store_true",
+                   help="Benchmark the pose stage (crops/s) instead of tracking")
+    p.add_argument("--tracks", default=None, help="Tracks table (.parquet/.csv) for --pose")
+    p.add_argument("--model", default=None,
+                   help="Trained sleap-nn model dir for --pose (else cfg.sleap_model_path)")
+    p.add_argument("--pose-max-frames", type=int, default=150,
+                   help="Pose frames per run for --pose (default 150)")
+    p.add_argument("--devices", default="mps,cpu", help="--pose device sweep (comma list)")
+    p.add_argument("--batches", default="4,16", help="--pose batch-size sweep (comma list)")
+    p.add_argument("--every-n", default="1,5", help="--pose every_n sweep (comma list)")
     args = p.parse_args(argv)
 
     cfg = load_config()
@@ -290,6 +424,31 @@ def main(argv=None):
     video_path = Path(args.video)
     timing_path = Path(args.timing) if args.timing else video_path.with_suffix(".csv")
     video = load_video_asset(video_path, timing_path)
+
+    if args.pose:
+        import pandas as pd
+        if not args.tracks or not Path(args.tracks).exists():
+            p.error("--pose needs --tracks <parquet/csv>")
+        tp = Path(args.tracks)
+        df = pd.read_csv(tp) if tp.suffix.lower() == ".csv" else pd.read_parquet(tp)
+        if args.model:
+            cfg.sleap_model_path = args.model
+        if not cfg.sleap_model_path:
+            p.error("--pose needs a trained model: pass --model <dir> (or set sleap_model_path)")
+        cfg.pose_backend = "sleap-nn"
+        devices = [d.strip() for d in args.devices.split(",") if d.strip()]
+        batches = [int(b) for b in args.batches.split(",") if b.strip()]
+        every_ns = [int(e) for e in args.every_n.split(",") if e.strip()]
+        print("POSE BENCHMARK:")
+        res = benchmark_pose(video, df, cfg, max_frames=args.pose_max_frames,
+                             devices=devices, batch_values=batches, every_n_values=every_ns)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        out = Path(args.report_dir) / f"benchmark_pose_{ts}.toml"
+        write_pose_report(res, out, video, cfg, git_commit=_git_commit())
+        if res["best"]:
+            b = res["best"]
+            print(f"best={b['crops_s']} crops/s @ device={b['device']} batch={b['batch']}  report={out}")
+        return
 
     # Local staging (unless disabled) so reads/seeks hit a fast local disk.
     if not args.no_stage:
