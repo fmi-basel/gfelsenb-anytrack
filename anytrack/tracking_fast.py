@@ -788,5 +788,9 @@ def _rmtree_quiet(path: Path) -> None:
 
 
 def _hw_decode_flags(video_path, cfg):
-    """Hardware-decode FFmpeg flags for this source (Phase 3 wires this up)."""
-    return []
+    """Hardware-decode FFmpeg flags for this source (probed + cached), or []."""
+    try:
+        from .preprocess import hw_decode_flags
+        return hw_decode_flags(video_path, cfg)
+    except Exception:
+        return []

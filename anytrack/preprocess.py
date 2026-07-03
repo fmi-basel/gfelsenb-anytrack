@@ -97,6 +97,70 @@ def check_ffmpeg_available() -> bool:
     return shutil.which("ffmpeg") is not None
 
 
+def get_ffprobe_path() -> Optional[str]:
+    """Path to ffprobe, or None if not installed."""
+    return shutil.which("ffprobe")
+
+
+def _probe_codec(video_path) -> Optional[str]:
+    """Video stream codec name via ffprobe (e.g. 'h264', 'mpeg4'), or None."""
+    ffprobe = get_ffprobe_path()
+    if ffprobe is None:
+        return None
+    try:
+        out = subprocess.run(
+            [ffprobe, "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=codec_name", "-of", "default=np=1:nq=1",
+             str(video_path)],
+            capture_output=True, text=True, timeout=30,
+        )
+        return (out.stdout or "").strip() or None
+    except Exception:
+        return None
+
+
+# Cache the hardware-decode decision per (backend, codec): whether -hwaccel
+# actually initializes on this machine for this codec. Probed once (cheap).
+_HW_DECODE_CACHE: Dict[tuple, list] = {}
+
+
+def _hwaccel_probe_ok(video_path, flags) -> bool:
+    """Decode one frame with ``flags`` to confirm the hwaccel initializes."""
+    try:
+        r = subprocess.run(
+            [get_ffmpeg_path(), "-v", "error", *flags, "-i", str(video_path),
+             "-frames:v", "1", "-f", "null", "-"],
+            capture_output=True, text=True, timeout=60,
+        )
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def hw_decode_flags(video_path, cfg) -> list:
+    """FFmpeg input flags for hardware decode of this source, or ``[]``.
+
+    Honors ``cfg.use_hw_decode`` / ``cfg.hw_decode_backend`` (auto|videotoolbox|
+    none). The decision is probed once per (backend, codec) by decoding a single
+    frame and cached — if the hwaccel can't initialize (e.g. VideoToolbox has no
+    mpeg4 decoder), we return ``[]`` and FFmpeg decodes in software as before.
+    Passing ``-hwaccel`` is harmless when unsupported (FFmpeg silently uses SW),
+    but probing avoids relying on that and lets callers know the true state.
+    """
+    if not getattr(cfg, "use_hw_decode", True):
+        return []
+    backend = getattr(cfg, "hw_decode_backend", "auto") or "auto"
+    if backend == "none":
+        return []
+    if backend == "auto":
+        backend = "videotoolbox"
+    key = (backend, _probe_codec(video_path))
+    if key not in _HW_DECODE_CACHE:
+        flags = ["-hwaccel", backend]
+        _HW_DECODE_CACHE[key] = flags if _hwaccel_probe_ok(video_path, flags) else []
+    return list(_HW_DECODE_CACHE[key])
+
+
 def roi_crop_geometry(roi: CircleROI, downscale: int) -> Tuple[int, int, int, int]:
     """Square crop + downscaled size for one ROI — shared by every extract path.
 
