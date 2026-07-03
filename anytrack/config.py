@@ -80,6 +80,7 @@ class AnyTrackConfig:
     n_tracking_workers: int = 4  # Number of parallel tracking workers
     use_hw_encode: bool = True  # Try hardware encoding (VideoToolbox on macOS)
     cleanup_roi_videos: bool = True  # Delete temp ROI videos after tracking
+    cv_threads_per_worker: int = 1  # OpenCV threads inside each tracking worker (0 = leave default)
 
     # Background adaptation (opt-in). Off by default so tracking output is
     # unchanged vs. the static GMM; enable for slowly drifting illumination.

@@ -97,6 +97,24 @@ def check_ffmpeg_available() -> bool:
     return shutil.which("ffmpeg") is not None
 
 
+def roi_crop_geometry(roi: CircleROI, downscale: int) -> Tuple[int, int, int, int]:
+    """Square crop + downscaled size for one ROI — shared by every extract path.
+
+    Returns ``(crop_size, x0, y0, scaled_size)``. ``crop_size`` is rounded down to
+    a multiple of ``2*downscale`` so the downscaled output has EVEN dimensions
+    (libx264/yuv420p rejects odd width/height, which would fail the encode).
+    ``scaled_size == crop_size`` when ``downscale == 1``. Cropping the full-frame
+    background with the same geometry (Phase 5) reproduces a worker's ROI
+    background exactly.
+    """
+    crop_size = int(2 * roi.r)
+    crop_size -= crop_size % (2 * downscale)
+    x0 = int(max(0, roi.cx - roi.r))
+    y0 = int(max(0, roi.cy - roi.r))
+    scaled_size = crop_size // downscale if downscale > 1 else crop_size
+    return crop_size, x0, y0, scaled_size
+
+
 def extract_roi_video(
     input_video: Path,
     roi: CircleROI,
@@ -121,19 +139,13 @@ def extract_roi_video(
     """
     ffmpeg = get_ffmpeg_path()
 
-    # Calculate crop dimensions (square around ROI). Round down to a multiple of
-    # 2*downscale so the downscaled output has EVEN dimensions — libx264 (yuv420p)
-    # rejects odd width/height, which would fail the single-pass encode.
-    crop_size = int(2 * roi.r)
-    crop_size -= crop_size % (2 * downscale)
-    x0 = int(max(0, roi.cx - roi.r))
-    y0 = int(max(0, roi.cy - roi.r))
+    # Square crop around the ROI (even downscaled dims for libx264).
+    crop_size, x0, y0, scaled_size = roi_crop_geometry(roi, downscale)
 
     # Build filter chain
     filters = [f"crop={crop_size}:{crop_size}:{x0}:{y0}"]
 
     if downscale > 1:
-        scaled_size = crop_size // downscale
         filters.append(f"scale={scaled_size}:{scaled_size}")
 
     filter_chain = ",".join(filters)
@@ -213,11 +225,7 @@ def _extract_roi_videos_single_pass(
     results: Dict[str, PreprocessResult] = {}
 
     for i, roi in enumerate(rois):
-        crop_size = int(2 * roi.r)
-        crop_size -= crop_size % (2 * downscale)  # even output dims for libx264
-        x0 = int(max(0, roi.cx - roi.r))
-        y0 = int(max(0, roi.cy - roi.r))
-        scaled_size = crop_size // downscale if downscale > 1 else crop_size
+        crop_size, x0, y0, scaled_size = roi_crop_geometry(roi, downscale)
 
         # Filter for this ROI: [vN]crop=...,scale=...[outN]  (fed by split, below)
         filter_str = f"[v{i}]crop={crop_size}:{crop_size}:{x0}:{y0}"

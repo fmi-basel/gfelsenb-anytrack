@@ -199,6 +199,17 @@ def _track_roi_worker(args: tuple) -> FlyTrack:
     from .models import CircleROI
 
     cfg = AnyTrackConfig(**cfg_dict)
+
+    # Pin OpenCV to a single internal thread per worker: N worker processes each
+    # spinning OpenCV's own thread pool oversubscribes the cores. This is a
+    # standalone tracking win and a prerequisite for cross-video concurrency.
+    _nthreads = int(getattr(cfg, "cv_threads_per_worker", 1) or 0)
+    if _nthreads > 0:
+        try:
+            cv2.setNumThreads(_nthreads)
+        except Exception:
+            pass
+
     timing = pd.DataFrame(timing_dict)
 
     # Build the frame-progress callback from the shared counter (if any). Under
