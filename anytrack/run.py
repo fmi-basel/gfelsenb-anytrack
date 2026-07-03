@@ -77,6 +77,12 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help="Cap QC overlay frames (0 = whole video).")
     ap.add_argument("--qc-overlay-stride", type=int, default=None,
                     help="Render every Nth frame in the QC overlay (default from config: 5; 1 = every frame).")
+    ap.add_argument("--crop-roi", default=None,
+                    help="Crop the QC overlay to one ROI (arena) by name, e.g. arena_02.")
+    ap.add_argument("--follow", default=None,
+                    help="Crop the QC overlay to a window following a track: 'ROI' or 'ROI:track_id'.")
+    ap.add_argument("--follow-size", type=int, default=256,
+                    help="Follow-window size in full-res px (default 256).")
     ap.add_argument("--crops", action="store_true",
                     help="Also export centroid-centered crops (A5).")
     ap.add_argument("--pose", action="store_true",
@@ -164,7 +170,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         qc_dir = out.parent / f"{out.stem}_qc"
         res = run_qc(video, df, cfg, qc_dir, overlay=True,
                      max_frames=args.qc_max_frames, show_progress=True,
-                     background=bg_img, pose_df=getattr(session, "pose_dataframe", None))
+                     background=bg_img, pose_df=getattr(session, "pose_dataframe", None),
+                     crop_roi=args.crop_roi, follow=args.follow, follow_size=args.follow_size)
         ok(f"QC → {qc_dir}" + (f" (overlay {res['overlay_frames']} frames)"
                                if res.get("overlay_path") else " (overlay skipped)"))
         if res.get("report_path"):
