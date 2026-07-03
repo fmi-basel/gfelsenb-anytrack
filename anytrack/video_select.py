@@ -82,11 +82,20 @@ def _curses_select(labels: List[str]) -> List[int]:
 
     def _run(stdscr):
         curses.curs_set(0)
+        # Inherit the terminal's own background instead of painting it black, so
+        # the selector blends in (no "clear to black" on light themes).
+        try:
+            curses.start_color()
+            curses.use_default_colors()
+            curses.init_pair(1, -1, -1)
+            stdscr.bkgd(" ", curses.color_pair(1))
+        except Exception:
+            pass
         checked = [True] * len(labels)     # default: all selected
         pos = 0
         head = "↑/↓ move · Space toggle · a all · n none · Enter confirm · q cancel"
         while True:
-            stdscr.clear()
+            stdscr.erase()
             stdscr.addstr(0, 0, head[:max(0, curses.COLS - 1)])
             for i, lab in enumerate(labels):
                 mark = "[x]" if checked[i] else "[ ]"
@@ -156,5 +165,7 @@ def resolve_videos(path, validator: Validator = validate_openable) -> List[Path]
         return valid
     idx = checkbox_select(labels)
     chosen = [valid[i] for i in idx]
-    print(f"selected {len(chosen)}/{len(valid)} video(s).")
+    print(f"selected {len(chosen)}/{len(valid)} video(s):")
+    for c in chosen:
+        print(f"  • {c.name}")
     return chosen
