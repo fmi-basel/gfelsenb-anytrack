@@ -19,7 +19,9 @@ from .session import TrackingSession
 from .writer import write_tracks, default_output_path
 from .benchmark import ensure_rois
 from .background import build_background_image
-from .cli_progress import TqdmProgress, header, step, ok, info
+from .cli_progress import (
+    TqdmProgress, header, step, ok, info, _fmt_dt, batch_banner, batch_summary,
+)
 
 
 # File suffixes that mean "--output is a file path"; anything else is a directory.
@@ -146,70 +148,119 @@ def main(argv: Optional[List[str]] = None) -> int:
     if not videos:
         ap.error(f"no videos to process for {args.video}")
 
-    def _run_one(video_path) -> bool:
+    def _run_one(video_path, idx: int, n: int):
+        # Batch mode (>1 video): one compact animated line per video. Single mode
+        # keeps the verbose boxed header/step/ok/info layout unchanged. Returns
+        # the tracked row count on success, or None on skip/failure.
+        batch = n > 1
+        bp = None
+        if batch:
+            from .cli_progress import BatchProgress
+            bp = BatchProgress(idx, n, Path(video_path).name)
+
         timing = args.timing if (single and args.timing) else Path(video_path).with_suffix(".csv")
         if not Path(timing).exists():
-            info(f"skip {Path(video_path).name}: timing CSV not found ({timing})")
-            return False
+            if bp is not None:
+                bp.finish(f"skip: timing CSV not found ({Path(timing).name})", ok=False)
+            else:
+                info(f"skip {Path(video_path).name}: timing CSV not found ({timing})")
+            return None
         video = load_video_asset(Path(video_path), Path(timing))
-        header(f"anytrack · {Path(video_path).name}")
-        info(f"mode: {'fast' if cfg.fast_mode else 'legacy'}   frames: {video.frame_count}   timing: {Path(timing).name}")
+        # One progress sink for the whole video: the animated line in batch mode,
+        # tqdm bars in single mode. Shared across ROI detection → track → pose so
+        # each stage draws a frame-based bar.
+        progress = bp if batch else TqdmProgress()
+        if not batch:
+            header(f"anytrack · {Path(video_path).name}")
+            info(f"mode: {'fast' if cfg.fast_mode else 'legacy'}   frames: {video.frame_count}   timing: {Path(timing).name}")
+            step("Detect ROIs (background + arena detection) …")
+        else:
+            bp.phase("roi", "detecting ROIs…")
 
-        step("Detect ROIs (background + arena detection) …")
         # Build the model background once; reuse it for ROI detection and QC.
-        bg_img = build_background_image(video.video_path, cfg) if (not video.rois or args.qc) else None
+        bg_img = (build_background_image(video.video_path, cfg, progress_hook=progress)
+                  if (not video.rois or args.qc) else None)
         ensure_rois(video, cfg, background=bg_img)
         if not video.rois:
-            info("No ROIs detected; nothing to track.")
-            return False
-        ok(f"{len(video.rois)} ROI(s): {', '.join(r.name for r in video.rois)}")
+            if bp is not None:
+                bp.finish("no ROIs detected", ok=False)
+            else:
+                info("No ROIs detected; nothing to track.")
+            return None
+        if not batch:
+            ok(f"{len(video.rois)} ROI(s): {', '.join(r.name for r in video.rois)}")
 
-        progress = TqdmProgress()
         t0 = time.perf_counter()
         session = TrackingSession(cfg=cfg, video=video)
         df = session.run(progress_hook=progress)
-        progress.close()
+        if not batch:
+            progress.close()
         dt = time.perf_counter() - t0
 
         out = _resolve_output_path(args.output, cfg, video)
         fmt = "csv" if out.suffix.lower() == ".csv" else None
         write_tracks(df, out, fmt=fmt)
-        rows_s = (len(df) / dt) if dt > 0 else 0.0
-        ok(f"tracked {len(df)} rows in {dt:.1f}s ({rows_s:.0f} rows/s)")
-        info(f"→ {out}")
+        pose_note = ""
+        if not batch:
+            rows_s = (len(df) / dt) if dt > 0 else 0.0
+            ok(f"tracked {len(df)} rows in {dt:.1f}s ({rows_s:.0f} rows/s)")
+            info(f"→ {out}")
 
         if cfg.pose_enabled and getattr(session, "pose_dataframe", None) is not None:
             from .writer import write_pose
             pose_out = out.with_name(out.stem.replace("_tracks", "") + "_pose" + out.suffix)
             write_pose(session.pose_dataframe, pose_out, fmt=fmt)
-            ok(f"pose: {len(session.pose_dataframe)} rows ({session.pose_dataframe['keypoint'].nunique()} keypoints) → {pose_out}")
-        elif cfg.pose_enabled:
+            pose_note = f" · {len(session.pose_dataframe)} pose rows"
+            if not batch:
+                ok(f"pose: {len(session.pose_dataframe)} rows ({session.pose_dataframe['keypoint'].nunique()} keypoints) → {pose_out}")
+        elif cfg.pose_enabled and not batch:
             info("pose stage produced no output (see warnings above).")
 
         if args.qc or args.qc_full:
             from .qc import run_qc
-            step("QC (overlay + plots + flags + summary) …")
+            if batch:
+                bp.phase("qc", "QC…")
+            else:
+                step("QC (overlay + plots + flags + summary) …")
             qc_dir = out.parent / f"{out.stem}_qc"
             res = run_qc(video, df, cfg, qc_dir, overlay=True,
-                         max_frames=args.qc_max_frames, show_progress=True,
+                         max_frames=args.qc_max_frames, show_progress=not batch,
                          background=bg_img, pose_df=getattr(session, "pose_dataframe", None),
                          crop_roi=args.crop_roi, follow=args.follow, follow_size=args.follow_size,
                          crop_output_size=args.crop_size)
-            ok(f"QC → {qc_dir}" + (f" (overlay {res['overlay_frames']} frames)"
-                                   if res.get("overlay_path") else " (overlay skipped)"))
-            if res.get("report_path"):
-                info(f"report: {res['report_path']}")
+            if not batch:
+                ok(f"QC → {qc_dir}" + (f" (overlay {res['overlay_frames']} frames)"
+                                       if res.get("overlay_path") else " (overlay skipped)"))
+                if res.get("report_path"):
+                    info(f"report: {res['report_path']}")
 
         if args.crops:
             from .cropper import export_crops
-            step("Export centroid crops …")
+            if batch:
+                bp.phase("qc", "crops…")
+            else:
+                step("Export centroid crops …")
             crops_dir = out.parent / f"{out.stem}_crops"
-            manifest = export_crops(video, df, cfg, out_dir=crops_dir, show_progress=True)
-            ok(f"exported {len(manifest)} crops → {crops_dir}")
-        return True
+            manifest = export_crops(video, df, cfg, out_dir=crops_dir, show_progress=not batch)
+            if not batch:
+                ok(f"exported {len(manifest)} crops → {crops_dir}")
 
-    n_ok = sum(1 for v in videos if _run_one(v))
-    header(f"done — {n_ok}/{len(videos)} video(s)" if len(videos) > 1 else "done")
+        if bp is not None:
+            bp.finish(f"{len(video.rois)} ROIs · {len(df)} rows · {_fmt_dt(dt)}{pose_note}")
+        return len(df)
+
+    n = len(videos)
+    if n > 1:
+        batch_banner(n, "fast" if cfg.fast_mode else "legacy")
+    t_all = time.perf_counter()
+    results = [_run_one(v, i, n) for i, v in enumerate(videos, 1)]
+    dt_all = time.perf_counter() - t_all
+    n_ok = sum(1 for r in results if r is not None)
+    if n > 1:
+        total_rows = sum(r for r in results if r is not None)
+        batch_summary(n_ok, n, total_rows, dt_all)
+    else:
+        header("done")
     return 0 if n_ok else 1
 
 

@@ -584,12 +584,28 @@ class BackgroundState:
         self.prev_fg = m
 
 
-def build_background_image(video_path, cfg) -> np.ndarray:
+def build_background_image(video_path, cfg, progress_hook=None) -> np.ndarray:
     """Build the model background image using the config's GMM/arena params.
 
     Thin wrapper around :func:`build_background` with the standard config
-    mapping, so ROI detection and QC share one background definition.
+    mapping, so ROI detection and QC share one background definition. When
+    ``progress_hook`` is given, the frame-sampling loop is surfaced as
+    ``("frames", {"stage": "roi", "n", "total"})`` so the CLI can draw a
+    frame-based ROI-detection bar.
     """
+    debug_hook = None
+    if progress_hook is not None:
+        def debug_hook(event, payload):  # translate sampling → frame progress
+            if event == "sampling_progress":
+                try:
+                    progress_hook("frames", {
+                        "stage": "roi",
+                        "n": int(payload.get("step", 0)),
+                        "total": int(payload.get("total", 0)),
+                    })
+                except Exception:
+                    pass
+
     return build_background(
         str(video_path),
         n_samples=cfg.gmm_n_samples,
@@ -600,4 +616,6 @@ def build_background_image(video_path, cfg) -> np.ndarray:
         arena_detection=cfg.arena_detection_enabled,
         arena_min_area_frac=cfg.arena_min_area_frac,
         arena_blur_sigma=cfg.arena_blur_sigma,
+        debug=progress_hook is not None,
+        debug_hook=debug_hook,
     ).image

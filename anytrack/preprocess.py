@@ -7,12 +7,66 @@ from __future__ import annotations
 
 import subprocess
 import shutil
+import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Dict, Optional, Callable
+from typing import List, Dict, Optional, Callable, Tuple
 import tempfile
 
 from .models import CircleROI
+
+
+def _run_ffmpeg_with_progress(
+    cmd: List[str],
+    total_frames: int,
+    progress_hook: Optional[Callable[[str, dict], None]],
+    timeout: float = 600.0,
+) -> Tuple[int, str]:
+    """Run an FFmpeg command, streaming ``frame=`` progress as frame events.
+
+    The command must include ``-progress pipe:1`` so FFmpeg writes ``frame=N``
+    lines to stdout as it decodes; each is surfaced as
+    ``("frames", {"stage": "preprocess", "n", "total"})``. stderr is drained on a
+    side thread (so a full pipe never deadlocks) and returned for error
+    reporting. A watchdog kills the process after ``timeout`` seconds, letting
+    the caller fall back exactly as the old blocking path did on a nonzero code.
+
+    Returns ``(returncode, stderr_text)``.
+    """
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    stderr_chunks: List[str] = []
+
+    def _drain() -> None:
+        try:
+            for line in proc.stderr:  # type: ignore[union-attr]
+                stderr_chunks.append(line)
+        except Exception:
+            pass
+
+    drainer = threading.Thread(target=_drain, daemon=True)
+    drainer.start()
+    watchdog = threading.Timer(timeout, proc.kill)
+    watchdog.daemon = True
+    watchdog.start()
+
+    total = int(total_frames) if total_frames else 0
+    try:
+        for line in proc.stdout:  # type: ignore[union-attr]
+            line = line.strip()
+            if line.startswith("frame=") and progress_hook is not None:
+                try:
+                    n = int(line.split("=", 1)[1].strip())
+                    progress_hook("frames", {"stage": "preprocess", "n": n, "total": total})
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    finally:
+        proc.wait()
+        watchdog.cancel()
+        drainer.join(timeout=1.0)
+
+    return proc.returncode, "".join(stderr_chunks)
 
 
 @dataclass
@@ -142,6 +196,8 @@ def _extract_roi_videos_single_pass(
     output_dir: Path,
     downscale: int = 2,
     use_hw_encode: bool = True,
+    progress_hook: Optional[Callable[[str, dict], None]] = None,
+    total_frames: int = 0,
 ) -> Dict[str, PreprocessResult]:
     """
     Extract all ROI videos in a single FFmpeg pass.
@@ -200,34 +256,30 @@ def _extract_roi_videos_single_pass(
     split = f"[0:v]split={len(rois)}" + "".join(f"[v{i}]" for i in range(len(rois)))
     filter_complex = ";".join([split, *filter_parts])
 
+    # -progress pipe:1 streams `frame=N` to stdout so we can draw a decode bar;
+    # -nostats silences the (now redundant) stderr progress stats.
     cmd = [
         ffmpeg,
         "-y",
+        "-nostats",
+        "-progress", "pipe:1",
         "-i", str(input_video),
         "-filter_complex", filter_complex,
         *output_args,
     ]
 
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=600,
+    returncode, stderr = _run_ffmpeg_with_progress(cmd, total_frames, progress_hook)
+    if returncode != 0:
+        # Single-pass graph failed (e.g. HW-encoder contention across 4
+        # simultaneous outputs) or was killed by the watchdog. Fall back to the
+        # proven sequential extractor, preserving the encoder choice — never
+        # worse than before.
+        return _extract_roi_videos_sequential(
+            input_video, rois, output_dir,
+            downscale=downscale,
+            use_hw_encode=use_hw_encode,
+            progress_hook=progress_hook,
         )
-
-        if result.returncode != 0:
-            # Single-pass graph failed (e.g. HW-encoder contention across 4
-            # simultaneous outputs). Fall back to the proven sequential
-            # extractor, preserving the encoder choice — never worse than before.
-            return _extract_roi_videos_sequential(
-                input_video, rois, output_dir,
-                downscale=downscale,
-                use_hw_encode=use_hw_encode,
-            )
-
-    except subprocess.TimeoutExpired:
-        raise RuntimeError("FFmpeg timed out during ROI extraction")
 
     return results
 
@@ -274,6 +326,7 @@ def extract_roi_videos(
     downscale: int = 2,
     use_hw_encode: bool = True,
     progress_hook: Optional[Callable[[str, dict], None]] = None,
+    total_frames: int = 0,
 ) -> Dict[str, PreprocessResult]:
     """
     Extract all ROI sub-videos using FFmpeg.
@@ -308,6 +361,8 @@ def extract_roi_videos(
         output_dir=output_dir,
         downscale=downscale,
         use_hw_encode=use_hw_encode,
+        progress_hook=progress_hook,
+        total_frames=total_frames,
     )
 
     if progress_hook:

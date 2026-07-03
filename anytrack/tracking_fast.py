@@ -8,12 +8,25 @@ Detection and centroid linking are delegated to the shared ``detector`` and
 from __future__ import annotations
 
 import multiprocessing as mp
+import threading
 import time
 from pathlib import Path
 from typing import List, Dict, Optional, Callable
 import numpy as np
 import cv2
 import pandas as pd
+
+
+class _FrameCounter:
+    """Minimal ``.value`` counter for the single-worker (in-process) frame bar.
+
+    Mirrors the ``.value`` interface of a ``multiprocessing.Manager().Value`` so
+    the same worker/poller code drives both the in-process and pool paths.
+    """
+    __slots__ = ("value",)
+
+    def __init__(self) -> None:
+        self.value = 0
 
 from .models import CircleROI, FlyTrack, EllipseObservation, TrackingResult, VideoAsset
 from .background import build_background, BackgroundState
@@ -31,6 +44,7 @@ def track_roi_video(
     cfg: AnyTrackConfig,
     roi_background: Optional[np.ndarray] = None,
     return_timing: bool = False,
+    on_frames: Optional[Callable[[int], None]] = None,
 ):
     """
     Track a single pre-cropped ROI video.
@@ -43,6 +57,9 @@ def track_roi_video(
         roi_background: Optional pre-cropped background (avoids per-ROI background building)
         return_timing: If True, return (FlyTrack, {bg_build_s, track_s, n_frames}) for
             per-stage benchmarking; otherwise return the FlyTrack (production default).
+        on_frames: Optional callback ``on_frames(delta)`` invoked periodically with
+            the number of frames processed since the last call — used to feed a
+            shared cross-worker frame counter for the tracking progress bar.
 
     Returns:
         FlyTrack, or (FlyTrack, timing_dict) when return_timing=True.
@@ -102,6 +119,7 @@ def track_roi_video(
     t_s_values = timing["t_s"].values.astype(np.float64)
 
     n_proc = 0
+    _reported = 0
     _t_track = time.perf_counter()
     for i in range(len(frame_indices)):
         frame_idx = int(frame_indices[i])
@@ -111,6 +129,11 @@ def track_roi_video(
         if not ok:
             break
         n_proc += 1
+        # Feed the shared frame counter in coarse batches (cheap: a few IPC calls
+        # per ROI instead of one per frame) so the tracking bar advances smoothly.
+        if on_frames is not None and n_proc - _reported >= 256:
+            on_frames(n_proc - _reported)
+            _reported = n_proc
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
@@ -150,6 +173,9 @@ def track_roi_video(
         )
         track.observations.append(obs)
 
+    if on_frames is not None and n_proc > _reported:
+        on_frames(n_proc - _reported)   # flush the final partial batch
+
     track_s = time.perf_counter() - _t_track
     cap.release()
     if return_timing:
@@ -159,7 +185,13 @@ def track_roi_video(
 
 def _track_roi_worker(args: tuple) -> FlyTrack:
     """Worker function for multiprocessing."""
-    roi_video_path, preprocess_result, timing_dict, cfg_dict, bg_data = args
+    # A 6th element (shared frame counter + lock) is optional so older/other
+    # callers passing a 5-tuple keep working.
+    if len(args) == 6:
+        roi_video_path, preprocess_result, timing_dict, cfg_dict, bg_data, shared = args
+    else:
+        roi_video_path, preprocess_result, timing_dict, cfg_dict, bg_data = args
+        shared = (None, None)
 
     # Reconstruct objects from serializable forms
     from .config import AnyTrackConfig
@@ -168,6 +200,19 @@ def _track_roi_worker(args: tuple) -> FlyTrack:
 
     cfg = AnyTrackConfig(**cfg_dict)
     timing = pd.DataFrame(timing_dict)
+
+    # Build the frame-progress callback from the shared counter (if any). Under
+    # 'spawn' these are Manager proxies; in single-worker mode they are plain
+    # in-process objects. Increments are best-effort — never break tracking.
+    counter, lock = shared
+    on_frames = None
+    if counter is not None:
+        def on_frames(delta, _c=counter, _l=lock):
+            try:
+                with _l:
+                    _c.value += int(delta)
+            except Exception:
+                pass
 
     # Reconstruct PreprocessResult
     pr = PreprocessResult(
@@ -184,7 +229,8 @@ def _track_roi_worker(args: tuple) -> FlyTrack:
         bg_bytes, bg_shape, bg_dtype = bg_data
         roi_background = np.frombuffer(bg_bytes, dtype=bg_dtype).reshape(bg_shape)
 
-    return track_roi_video(Path(roi_video_path), pr, timing, cfg, roi_background=roi_background)
+    return track_roi_video(Path(roi_video_path), pr, timing, cfg,
+                           roi_background=roi_background, on_frames=on_frames)
 
 
 def track_parallel(
@@ -215,6 +261,42 @@ def track_parallel(
     if n_workers is None:
         n_workers = min(len(preprocess_results), mp.cpu_count())
 
+    # Shared frame counter for a frame-granular tracking bar. Workers increment
+    # it (in coarse batches); a poller thread turns it into "frames" events. All
+    # best-effort — if setup fails, tracking runs exactly as before, sans bar.
+    total_frames = int(len(timing) * len(preprocess_results))
+    shared = (None, None)
+    counter = None
+    manager = None
+    poller = None
+    poll_stop = None
+    if progress_hook is not None:
+        try:
+            poll_stop = threading.Event()
+            if n_workers == 1:            # in-process: plain object + thread lock
+                counter, lock = _FrameCounter(), threading.Lock()
+            else:                         # pool: picklable Manager proxies
+                manager = mp.Manager()
+                counter, lock = manager.Value("i", 0), manager.Lock()
+            shared = (counter, lock)
+
+            def _poll(_c=counter, _stop=poll_stop):
+                while not _stop.wait(0.15):
+                    try:
+                        n = int(_c.value)
+                    except Exception:
+                        return
+                    try:
+                        progress_hook("frames",
+                                      {"stage": "track", "n": n, "total": total_frames})
+                    except Exception:
+                        pass
+
+            poller = threading.Thread(target=_poll, daemon=True)
+            poller.start()
+        except Exception:
+            shared, counter, manager, poller, poll_stop = (None, None), None, None, None, None
+
     # Prepare arguments for workers (must be serializable)
     timing_dict = timing.to_dict(orient="list")
     cfg_dict = {
@@ -242,7 +324,7 @@ def track_parallel(
         if roi_backgrounds is not None and roi_name in roi_backgrounds:
             bg = roi_backgrounds[roi_name]
             bg_data = (bg.tobytes(), bg.shape, str(bg.dtype))
-        worker_args.append((str(pr.video_path), pr_dict, timing_dict, cfg_dict, bg_data))
+        worker_args.append((str(pr.video_path), pr_dict, timing_dict, cfg_dict, bg_data, shared))
 
     if progress_hook:
         progress_hook("tracking", {
@@ -254,22 +336,11 @@ def track_parallel(
     # Run parallel tracking
     tracks: List[FlyTrack] = []
 
-    if n_workers == 1:
-        # Single worker - no multiprocessing overhead
-        for i, args in enumerate(worker_args):
-            track = _track_roi_worker(args)
-            tracks.append(track)
-            if progress_hook:
-                progress_hook("tracking", {
-                    "status": "progress",
-                    "completed": i + 1,
-                    "total": len(worker_args),
-                    "percent": (i + 1) / len(worker_args),
-                })
-    else:
-        # Use multiprocessing pool
-        with mp.Pool(n_workers) as pool:
-            for i, track in enumerate(pool.imap_unordered(_track_roi_worker, worker_args)):
+    try:
+        if n_workers == 1:
+            # Single worker - no multiprocessing overhead
+            for i, args in enumerate(worker_args):
+                track = _track_roi_worker(args)
                 tracks.append(track)
                 if progress_hook:
                     progress_hook("tracking", {
@@ -278,6 +349,35 @@ def track_parallel(
                         "total": len(worker_args),
                         "percent": (i + 1) / len(worker_args),
                     })
+        else:
+            # Use multiprocessing pool
+            with mp.Pool(n_workers) as pool:
+                for i, track in enumerate(pool.imap_unordered(_track_roi_worker, worker_args)):
+                    tracks.append(track)
+                    if progress_hook:
+                        progress_hook("tracking", {
+                            "status": "progress",
+                            "completed": i + 1,
+                            "total": len(worker_args),
+                            "percent": (i + 1) / len(worker_args),
+                        })
+    finally:
+        # Stop the poller, snap the bar to 100%, and tear down the Manager.
+        if poll_stop is not None:
+            poll_stop.set()
+        if poller is not None:
+            poller.join(timeout=0.5)
+        if progress_hook is not None:
+            try:
+                progress_hook("frames",
+                              {"stage": "track", "n": total_frames, "total": total_frames})
+            except Exception:
+                pass
+        if manager is not None:
+            try:
+                manager.shutdown()
+            except Exception:
+                pass
 
     if progress_hook:
         progress_hook("tracking", {
@@ -329,6 +429,7 @@ def track_video_fast(
         downscale=downscale,
         use_hw_encode=use_hw_encode,
         progress_hook=progress_hook,
+        total_frames=int(getattr(video, "frame_count", 0) or 0),
     )
 
     # Run parallel tracking (each worker builds its own background from ROI video)
