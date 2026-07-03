@@ -135,5 +135,6 @@ def build_engine(cfg, skeleton: Optional[Skeleton] = None) -> PoseEngine:
     if backend in ("sleap-nn", "sleap_nn", "sleapnn"):
         from .engine_sleap import SleapNNEngine
         return SleapNNEngine(model_path, skeleton,
-                             device=str(getattr(cfg, "pose_device", "auto") or "auto"))
+                             device=str(getattr(cfg, "pose_device", "auto") or "auto"),
+                             batch_size=int(getattr(cfg, "pose_batch_size", 0) or 0))
     raise ValueError(f"unknown pose_backend {backend!r} (use 'sleap-nn' or 'mock')")

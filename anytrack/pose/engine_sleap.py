@@ -48,10 +48,11 @@ class SleapNNEngine:
     """
 
     def __init__(self, model_path: str, skeleton=None, device: str = "auto",
-                 peak_threshold: float = 0.2):
+                 peak_threshold: float = 0.2, batch_size: int = 0):
         self.model_path = str(model_path)
         self.keypoint_names: Optional[List[str]] = list(skeleton.nodes) if skeleton else None
         self.peak_threshold = float(peak_threshold)
+        self.batch_size = int(batch_size)
         self._device = _torch_device(device)
         self.predictor = None
         self._load()
@@ -70,6 +71,13 @@ class SleapNNEngine:
             self.predictor = sleap_nn.load_models([self.model_path], device=self._device)
         except TypeError:
             self.predictor = sleap_nn.load_models([self.model_path])
+        # Apply the configured batch size: the model's own default is small (~4),
+        # but larger batches are markedly faster on GPU/MPS (see anytrack-bench --pose).
+        if self.batch_size > 0 and getattr(self.predictor, "batch_size", None) is not None:
+            try:
+                self.predictor.batch_size = self.batch_size
+            except Exception:
+                pass
         if self.keypoint_names is None:
             skel = getattr(self.predictor, "skeleton", None)
             if skel is not None:
