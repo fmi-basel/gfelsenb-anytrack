@@ -164,7 +164,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         qc_dir = out.parent / f"{out.stem}_qc"
         res = run_qc(video, df, cfg, qc_dir, overlay=True,
                      max_frames=args.qc_max_frames, show_progress=True,
-                     background=bg_img)
+                     background=bg_img, pose_df=getattr(session, "pose_dataframe", None))
         ok(f"QC → {qc_dir}" + (f" (overlay {res['overlay_frames']} frames)"
                                if res.get("overlay_path") else " (overlay skipped)"))
         if res.get("report_path"):

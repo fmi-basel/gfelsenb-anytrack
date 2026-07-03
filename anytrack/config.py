@@ -119,6 +119,11 @@ class AnyTrackConfig:
     # read the fly's dynamics (motion direction disambiguates head/tail). Neighbor
     # crops use the anchor centroid (fixed box), so labels overlay consistently.
     pose_label_context: int = 10
+    # Pose QC (B5): confidence gate for overlay/flags, and the frame-to-frame
+    # body-axis reversal that flags a head/tail flip.
+    pose_conf_min: float = 0.2          # keypoints below this are flagged / not drawn
+    pose_headtail_flip_deg: float = 120.0
+    pose_wing_extend_frac: float = 0.15  # wing lateral offset (frac of body len) to count as "extended"
 
     # Quality control
     qc_min_contrast: float = 10.0       # flag_low_contrast when detection contrast < this

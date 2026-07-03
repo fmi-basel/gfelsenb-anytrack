@@ -509,9 +509,18 @@ def write_html_report(out_dir: Path, summary: Dict[str, Any], artifacts: Dict[st
         rows += f"<tr><th>{roi}</th>{cells}</tr>"
     table = f"<table><tr><th>roi</th>{head}</tr>{rows}</table>" if per_roi else "<p>No data.</p>"
 
+    # Optional pose-flag summary line.
+    pose = summary.get("pose") or {}
+    pose_html = ""
+    if pose:
+        rate = lambda k: f"{100 * pose.get(k, 0.0):.1f}%"   # noqa: E731
+        pose_html = (f"<p><b>Pose</b> ({pose.get('n_instances', 0)} instances): "
+                     f"low-confidence {rate('flag_low_conf')}, missing {rate('flag_missing')}, "
+                     f"wing-swap {rate('flag_wing_swap')}, head/tail flip {rate('flag_headtail')}.</p>")
+
     # Embed each artifact image by its filename (relative to this HTML).
     order = ["background", "overlay", "diagnostics", "timeseries", "kinematics",
-             "drift", "occupancy", "coverage", "montage"]
+             "drift", "occupancy", "coverage", "pose_confidence", "montage"]
     imgs = ""
     for name in order:
         p = artifacts.get(name)
@@ -535,6 +544,7 @@ def write_html_report(out_dir: Path, summary: Dict[str, Any], artifacts: Dict[st
 </style></head><body>
 <h1>anytrack QC report</h1>
 <p>{summary.get('n_rois', 0)} ROI(s), {summary.get('n_frames', 0)} frames.</p>
+{pose_html}
 {table}
 {imgs}
 </body></html>"""
@@ -551,6 +561,7 @@ def render_overlay(
     max_frames: int = 0,
     trail_len: int = 30,
     show_progress: bool = False,
+    pose_df: Optional[pd.DataFrame] = None,
 ) -> Tuple[Optional[Path], int]:
     """Burn tracking annotations onto the source video.
 
@@ -604,6 +615,14 @@ def render_overlay(
     ring = max(4, round(8 * sx))
     F = cv2.FONT_HERSHEY_SIMPLEX
 
+    # Optional pose skeleton overlay (Milestone B5).
+    pose_prep = None
+    if pose_df is not None and not pose_df.empty:
+        from .pose.qc_pose import prepare_pose_overlay, draw_pose
+        from .pose.skeleton import get_skeleton
+        pose_prep = prepare_pose_overlay(pose_df, get_skeleton(cfg), cfg, sx, sy)
+        pose_radius = max(2, round(3 * sx))
+
     def annotate(frame, fidx):
         for (nm, cx, cy, rr, col) in rois_s:
             cv2.circle(frame, (cx, cy), rr, col, th)
@@ -623,6 +642,8 @@ def render_overlay(
                 cv2.circle(frame, (cx, cy), dot, col, -1)
                 if any(bool(r.get(c, False)) for c in FLAG_COLUMNS):
                     cv2.circle(frame, (cx, cy), ring, (0, 0, 255), th)
+        if pose_prep is not None:
+            draw_pose(frame, fidx, pose_prep, thickness=th, radius=pose_radius)
         cv2.putText(frame, f"frame {fidx}", (8, 22), F, 0.6, (255, 255, 255), 1)
 
     pbar = None
@@ -788,6 +809,7 @@ def run_qc(
     show_progress: bool = False,
     background=None,
     save_background: bool = True,
+    pose_df: Optional[pd.DataFrame] = None,
 ) -> Dict[str, Any]:
     """Produce all QC artifacts into ``out_dir`` and return a manifest dict.
 
@@ -829,6 +851,20 @@ def run_qc(
     drift = plot_drift(df, cfg, out_dir)  # empty unless bg_drift_correction was on
     plots = diagnostics + timeseries + kinematics + occupancy + coverage + drift
 
+    # Pose QC (B5): confidence plot + per-instance flags, when a pose table is given.
+    pose_confidence: List[Path] = []
+    pose_flags_path: Optional[Path] = None
+    if pose_df is not None and not pose_df.empty:
+        from .pose.qc_pose import compute_pose_flags, plot_pose_confidence, pose_flag_summary
+        from .pose.skeleton import get_skeleton
+        pose_flags = compute_pose_flags(pose_df, get_skeleton(cfg), cfg)
+        pose_flags_path = out_dir / "qc_pose_flags.parquet"
+        write_diagnostics(pose_flags, pose_flags_path, fmt="parquet")
+        summary["pose"] = pose_flag_summary(pose_flags)
+        pose_confidence = plot_pose_confidence(pose_df, cfg, out_dir)
+        plots = plots + pose_confidence
+        summary_path.write_text(json.dumps(summary, indent=2))  # refresh with pose stats
+
     montage_path, n_montage = render_flagged_montage(
         video, df, cfg, out_dir / "qc_flagged_montage.png"
     )
@@ -838,7 +874,7 @@ def run_qc(
     if overlay:
         overlay_path, n_overlay = render_overlay(
             video, df, cfg, out_dir / "qc_overlay.mp4",
-            max_frames=max_frames, show_progress=show_progress,
+            max_frames=max_frames, show_progress=show_progress, pose_df=pose_df,
         )
 
     def _first(paths):
@@ -853,6 +889,7 @@ def run_qc(
         "drift": _first(drift),
         "occupancy": _first(occupancy),
         "coverage": _first(coverage),
+        "pose_confidence": _first(pose_confidence),
         "montage": montage_path,
     })
 
@@ -860,6 +897,7 @@ def run_qc(
         "summary": summary,
         "summary_path": summary_path,
         "flags_path": flags_path,
+        "pose_flags_path": pose_flags_path,
         "background_path": background_path,
         "plots": plots,
         "montage_path": montage_path,
@@ -889,6 +927,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--video", required=True, type=Path, help="Source video.")
     ap.add_argument("--tracks", required=True, type=Path,
                     help="Tracks table (.parquet or .csv) with roi/track_id/frame/x/y columns.")
+    ap.add_argument("--pose", type=Path, default=None,
+                    help="Pose table (<stem>_pose.parquet) to add skeleton overlay + confidence + flags.")
     ap.add_argument("--out-dir", type=Path, default=None,
                     help="Output directory (default: <cfg.output_dir or .>/qc).")
     ap.add_argument("--no-overlay", action="store_true", help="Skip the overlay video (fast).")
@@ -913,6 +953,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         ap.error(f"tracks not found: {args.tracks}")
 
     df = _read_tracks(args.tracks)
+    pose_df = None
+    if args.pose is not None:
+        if not args.pose.exists():
+            ap.error(f"pose table not found: {args.pose}")
+        pose_df = _read_tracks(args.pose)
 
     cap = cv2.VideoCapture(str(args.video))
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -925,7 +970,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     out_dir = args.out_dir or (Path(getattr(cfg, "output_dir", "") or ".") / "qc")
     res = run_qc(video, df, cfg, out_dir, overlay=not args.no_overlay,
-                 max_frames=args.max_frames, show_progress=True)
+                 max_frames=args.max_frames, show_progress=True, pose_df=pose_df)
 
     print(f"QC written to {out_dir}")
     print(f"  summary: {res['summary_path']}")

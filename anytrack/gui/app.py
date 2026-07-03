@@ -1120,6 +1120,9 @@ class AnyTrackApp(tb.Window):
                 y2 = int(y + 20 * np.sin(ang))
                 cv2.line(disp, (x, y), (x2, y2), roi_color_bgr, 2)
 
+        # Pose skeleton overlay (Milestone B5), when a pose table is present.
+        self._draw_pose_overlay(disp, idx)
+
         self._last_disp_bgr = disp
         self._render_bgr_to_canvas(disp, resample="hq")
         if getattr(self, "preview_mode", "video") == "video":
@@ -1128,6 +1131,49 @@ class AnyTrackApp(tb.Window):
         # Update tracking debug window if open
         if self._tracking_debug_widgets:
             self._update_tracking_debug(frame, idx)
+
+    def _draw_pose_overlay(self, disp, idx: int):
+        """Draw predicted keypoints + skeleton for frame ``idx`` (full-res preview)."""
+        sess = self.session
+        pdf = getattr(sess, "pose_dataframe", None) if sess is not None else None
+        if pdf is None or pdf.empty:
+            return
+        # Cache skeleton/colors, keyed by the pose df identity (auto-invalidates
+        # when a new run replaces it).
+        if getattr(self, "_pose_prep_id", None) != id(pdf):
+            try:
+                from ..pose.skeleton import get_skeleton
+                from ..pose.labeling import resolve_node_colors
+                from ..pose.qc_pose import _hex_to_bgr
+                sk = get_skeleton(self.cfg)
+                nodes = list(sk.nodes)
+                colors = resolve_node_colors(nodes, getattr(self.cfg, "pose_node_colors", ""))
+                self._pose_prep = (nodes, sk.edge_indices(),
+                                   {n: _hex_to_bgr(colors[n]) for n in nodes},
+                                   float(getattr(self.cfg, "pose_conf_min", 0.2)))
+                self._pose_prep_id = id(pdf)
+            except Exception:
+                self._pose_prep = None
+                self._pose_prep_id = id(pdf)
+        prep = getattr(self, "_pose_prep", None)
+        if not prep:
+            return
+        nodes, edges, node_bgr, cmin = prep
+        fdf = pdf[pdf["frame"] == idx]
+        if fdf.empty:
+            return
+        for (_roi, _tid), g in fdf.groupby(["roi", "track_id"]):
+            inst = {r.keypoint: (r.x_full, r.y_full, r.score) for r in g.itertuples(index=False)}
+            for ai, bi in edges:
+                pa, pb = inst.get(nodes[ai]), inst.get(nodes[bi])
+                if (pa and pb and pa[2] >= cmin and pb[2] >= cmin
+                        and np.isfinite(pa[0]) and np.isfinite(pb[0])):
+                    cv2.line(disp, (int(pa[0]), int(pa[1])), (int(pb[0]), int(pb[1])),
+                             (210, 210, 210), 1, cv2.LINE_AA)
+            for name, (x, y, s) in inst.items():
+                if s >= cmin and np.isfinite(x) and np.isfinite(y):
+                    cv2.circle(disp, (int(x), int(y)), 4, node_bgr.get(name, (255, 255, 255)),
+                               -1, cv2.LINE_AA)
 
     def on_tree_double_click(self, event):
         iid = self.tree.identify_row(event.y)
@@ -2214,6 +2260,21 @@ class AnyTrackApp(tb.Window):
                             self._track_cancel_event.set()
                     except Exception:
                         pass
+
+                elif event == "pose":
+                    try:
+                        dialog.update_progress(0.98, text="Running pose estimation…")
+                    except Exception:
+                        pass
+
+                elif event in ("pose_done", "pose_error"):
+                    # Non-fatal: tracking still completes; the overlay reads the
+                    # session's pose_dataframe on the "done" event.
+                    if event == "pose_error":
+                        try:
+                            print("pose stage error:", payload.get("exc"))
+                        except Exception:
+                            pass
 
                 elif event == "done":
                     # payload contains 'session' and 'dataframe'
