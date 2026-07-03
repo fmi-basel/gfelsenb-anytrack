@@ -81,6 +81,7 @@ class AnyTrackConfig:
     use_hw_encode: bool = True  # Try hardware encoding (VideoToolbox on macOS)
     cleanup_roi_videos: bool = True  # Delete temp ROI videos after tracking
     cv_threads_per_worker: int = 1  # OpenCV threads inside each tracking worker (0 = leave default)
+    roi_stream_decode: bool = True  # Decode once and pipe raw gray crops to trackers (FIFO); else encode ROI mp4s
 
     # Background adaptation (opt-in). Off by default so tracking output is
     # unchanged vs. the static GMM; enable for slowly drifting illumination.

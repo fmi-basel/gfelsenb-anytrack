@@ -115,6 +115,54 @@ def roi_crop_geometry(roi: CircleROI, downscale: int) -> Tuple[int, int, int, in
     return crop_size, x0, y0, scaled_size
 
 
+def build_stream_command(input_video, rois, downscale, fifo_paths, hwaccel_flags=None):
+    """Build the decode-once FFmpeg command for the streaming path.
+
+    ONE decode of the source, split into N streams, each cropped+scaled+``gray``
+    and written as raw gray video to its FIFO (``fifo_paths[roi.name]``). Returns
+    ``(cmd, results, sizes)`` where ``results`` maps roi_name → PreprocessResult
+    (video_path = the FIFO) and ``sizes`` maps roi_name → scaled_size (the raw
+    gray frame is ``scaled_size × scaled_size`` bytes). ``hwaccel_flags`` (e.g.
+    ``["-hwaccel", "videotoolbox"]``) are inserted before ``-i``.
+    """
+    ffmpeg = get_ffmpeg_path()
+    filter_parts: List[str] = []
+    output_args: List[str] = []
+    results: Dict[str, PreprocessResult] = {}
+    sizes: Dict[str, int] = {}
+
+    for i, roi in enumerate(rois):
+        crop_size, x0, y0, scaled_size = roi_crop_geometry(roi, downscale)
+        fstr = f"[v{i}]crop={crop_size}:{crop_size}:{x0}:{y0}"
+        if downscale > 1:
+            fstr += f",scale={scaled_size}:{scaled_size}"
+        fstr += f",format=gray[out{i}]"
+        filter_parts.append(fstr)
+        output_args.extend([
+            "-map", f"[out{i}]", "-f", "rawvideo", "-pix_fmt", "gray",
+            str(fifo_paths[roi.name]),
+        ])
+        results[roi.name] = PreprocessResult(
+            roi_name=roi.name,
+            video_path=Path(fifo_paths[roi.name]),
+            original_roi=roi,
+            scale_factor=float(downscale),
+            crop_offset=(x0, y0),
+        )
+        sizes[roi.name] = scaled_size
+
+    split = f"[0:v]split={len(rois)}" + "".join(f"[v{i}]" for i in range(len(rois)))
+    filter_complex = ";".join([split, *filter_parts])
+    cmd = [
+        ffmpeg, "-y", "-nostats",
+        *(hwaccel_flags or []),
+        "-i", str(input_video),
+        "-filter_complex", filter_complex,
+        *output_args,
+    ]
+    return cmd, results, sizes
+
+
 def extract_roi_video(
     input_video: Path,
     roi: CircleROI,
