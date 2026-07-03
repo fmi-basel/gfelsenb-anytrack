@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="auto">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>anytrack — Training a Good Pose Model</title>
+<style>
+  :root{
+    --surface:#ffffff; --panel:#f6f7f9; --panel-2:#eef0f3; --border:#e4e7ec;
+    --ink:#1b1f27; --ink-muted:#616b7a; --accent:#2f6df6; --accent-ink:#1b4fd0;
+    --code-bg:#0f1216; --code-ink:#e6e9ed; --kbd:#eef0f3;
+    --good:#157f3c; --good-bg:#e6f4ec; --warn:#9a6400; --warn-bg:#fbf0dc;
+  }
+  @media (prefers-color-scheme: dark){ html[data-theme="auto"]{
+    --surface:#0f1216; --panel:#171b21; --panel-2:#1e232b; --border:#262b33;
+    --ink:#e6e9ed; --ink-muted:#99a3b1; --accent:#6ea0ff; --accent-ink:#9dc0ff;
+    --code-bg:#0a0c0f; --code-ink:#e6e9ed; --kbd:#1e232b;
+    --good:#46d08a; --good-bg:rgba(70,208,138,.14); --warn:#e6ad55; --warn-bg:rgba(230,173,85,.14);
+  }}
+  html[data-theme="dark"]{
+    --surface:#0f1216; --panel:#171b21; --panel-2:#1e232b; --border:#262b33;
+    --ink:#e6e9ed; --ink-muted:#99a3b1; --accent:#6ea0ff; --accent-ink:#9dc0ff;
+    --code-bg:#0a0c0f; --code-ink:#e6e9ed; --kbd:#1e232b;
+    --good:#46d08a; --good-bg:rgba(70,208,138,.14); --warn:#e6ad55; --warn-bg:rgba(230,173,85,.14);
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--surface);color:var(--ink);
+    font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:920px;margin:0 auto;padding:32px 22px 80px}
+  h1{font-size:26px;margin:0 0 4px}
+  h2{font-size:20px;margin:38px 0 10px;padding-top:10px;border-top:1px solid var(--border)}
+  h3{font-size:16px;margin:22px 0 6px}
+  .sub{color:var(--ink-muted);margin:0 0 8px}
+  a{color:var(--accent);text-decoration:none} a:hover{text-decoration:underline;color:var(--accent-ink)}
+  code{background:var(--panel-2);border:1px solid var(--border);border-radius:4px;padding:1px 5px;
+    font:13px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  pre{background:var(--code-bg);color:var(--code-ink);border-radius:8px;padding:14px 16px;overflow-x:auto;
+    font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;border:1px solid var(--border)}
+  pre code{background:none;border:none;padding:0;color:inherit}
+  .note{background:var(--panel);border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:6px;padding:10px 14px;margin:14px 0}
+  .note.warn{border-left-color:var(--warn);background:var(--warn-bg)}
+  .note.good{border-left-color:var(--good);background:var(--good-bg)}
+  table{border-collapse:collapse;width:100%;margin:12px 0;font-size:13.5px;display:block;overflow-x:auto}
+  th,td{border:1px solid var(--border);padding:6px 10px;text-align:left;vertical-align:top} th{background:var(--panel-2)}
+  ul,ol{margin:8px 0}
+  .toc{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:12px 18px;margin:16px 0}
+  .toc ol{margin:6px 0;padding-left:20px}
+  .muted{color:var(--ink-muted)}
+  .loop{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:14px 0}
+  .loop .step{background:var(--panel-2);border:1px solid var(--border);border-radius:999px;padding:5px 12px;font-size:13px;font-weight:600}
+  .loop .arrow{color:var(--ink-muted)}
+  b.k{color:var(--accent-ink)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>Training a Good Pose Model</h1>
+  <p class="sub">A practical playbook for <em>our</em> setup — dark flies in circular arenas, the
+    <code>fly5</code> skeleton (head · thorax · abdomen&nbsp;tip · wingL · wingR). For the mechanics
+    of each command see the <a href="tutorial.html">usage guide</a>.</p>
+
+  <div class="toc"><strong>Contents</strong>
+    <ol>
+      <li><a href="#goal">The goal &amp; where we stand</a></li>
+      <li><a href="#loop">The loop: label → train → find failures → repeat</a></li>
+      <li><a href="#what">What to label (and how much)</a></li>
+      <li><a href="#howlabel">Labelling well &amp; consistently</a></li>
+      <li><a href="#wings">The wing L/R problem (our #1 issue)</a></li>
+      <li><a href="#train">Training settings</a></li>
+      <li><a href="#evaluate">Evaluating: is it good yet?</a></li>
+      <li><a href="#checklist">Checklist</a></li>
+    </ol>
+  </div>
+
+  <h2 id="goal">The goal &amp; where we stand</h2>
+  <p>A "good" model here means: on a held-out clip, the QC skeleton overlay looks right frame-by-frame,
+    keypoint confidence is high, and the pose flags are low — especially <strong>wing-swap</strong>,
+    which is the hard part for a fly.</p>
+  <div class="note warn"><strong>Baseline (pilot).</strong> The 30-frame <code>fly5_v1</code> model
+    already had high confidence (median score ≈ 0.98) but a <strong>~14% wing-swap rate</strong>
+    (arena_02 ≈ 33%). That is the signature of "too few, too similar" labels: the body axis is easy,
+    but left/right wing is not learned. The fix is not more epochs — it is <strong>more, more diverse
+    labels</strong>, targeted at where the model fails.</div>
+
+  <h2 id="loop">The loop: label → train → find failures → repeat</h2>
+  <p>Do <strong>not</strong> try to label a perfect set up front. Bootstrap with a pilot, then let the
+    model tell you what to label next (active learning). Each round takes ~30–60 min and the flag
+    rates drop fast.</p>
+  <div class="loop">
+    <span class="step">1 · label a batch</span><span class="arrow">→</span>
+    <span class="step">2 · train</span><span class="arrow">→</span>
+    <span class="step">3 · infer + QC on a fresh clip</span><span class="arrow">→</span>
+    <span class="step">4 · read the flags, watch the fly-cam</span><span class="arrow">→</span>
+    <span class="step">5 · label the failures</span><span class="arrow">↺</span>
+  </div>
+  <ol>
+    <li><b class="k">Label a batch.</b> Round 1: ~80–100 frames (diversity sampling). Later rounds:
+      30–50 frames focused on the failures you found.
+<pre><code>uv run anytrack-label \
+  --video /data/flies/experiment.avi \
+  --tracks /data/flies/results/experiment_tracks.parquet \
+  --labels /data/flies/results/experiment_labels.json \
+  --n 100 --strategy diversity</code></pre>
+      <span class="muted">Later rounds: rerun with the same <code>--labels</code> to add to the store
+      (it resumes); bump <code>--n</code> to sample more candidates.</span></li>
+    <li><b class="k">Train</b> (bump the run name each round so models are versioned):
+<pre><code>uv run anytrack-train \
+  --labels /data/flies/results/experiment_labels.json \
+  --run-name fly5_v2 --epochs 100 --batch-size 16 --device mps</code></pre></li>
+    <li><b class="k">Infer + QC on a clip you did NOT train on</b> (sparse is fine for evaluation):
+<pre><code>uv run anytrack-run \
+  --video /data/flies/other_session.avi \
+  --output /data/flies/results/ \
+  --pose --pose-model /data/flies/results/models/fly5_v2 \
+  --pose-device mps --pose-every-n 5 \
+  --qc --qc-overlay-stride 5 --follow arena_02</code></pre></li>
+    <li><b class="k">Read the failures.</b> Open <code>qc_report.html</code>: the confidence plot and
+      the pose-flag rates. Then inspect <code>qc_pose_flags.parquet</code> to list the exact frames
+      that failed, and watch the cropped fly-cam overlay. The frames the model gets wrong are your
+      next labels.
+<pre><code>uv run python -c "import pandas as pd; f=pd.read_parquet('/data/flies/results/other_session_qc/qc_pose_flags.parquet'); \
+print(f[['flag_low_conf','flag_missing','flag_wing_swap','flag_headtail']].mean()); \
+print(f[f.flag_wing_swap][['roi','frame']].head(20))"</code></pre></li>
+    <li><b class="k">Label the failures</b> (point the labeller at that clip; label those frames), then
+      go back to step 2. Repeat until the flags plateau (see <a href="#evaluate">Evaluating</a>).</li>
+  </ol>
+
+  <h2 id="what">What to label (and how much)</h2>
+  <p><strong>Target ~150–300 confirmed frames</strong> for a solid model (the pilot's 30 is a proof of
+    concept). More matters less than <em>variety</em> — the diversity sampler stratifies by body angle
+    and size, but consciously cover these axes:</p>
+  <table>
+    <tr><th>axis</th><th>make sure you include…</th></tr>
+    <tr><td>Arena</td><td>all arenas (arena_01–04). Per-arena lighting/optics differ; arena_02 was worst — label it extra.</td></tr>
+    <tr><td>Body orientation</td><td>flies pointing every direction (the model must not assume "up").</td></tr>
+    <tr><td>Wing state</td><td><strong>both wings folded</strong>, <strong>one wing out</strong>, <strong>both wings out</strong>, wings asymmetric. This is where wing-swap is won or lost.</td></tr>
+    <tr><td>Position</td><td>centre of the arena <em>and</em> pressed against the wall (edge crops are hardest / lowest contrast).</td></tr>
+    <tr><td>Behaviour</td><td>walking, still, grooming, turning sharply (head/tail flips happen on fast turns).</td></tr>
+    <tr><td>Appearance</td><td>a few low-contrast / motion-blurred frames so the model is robust.</td></tr>
+  </table>
+  <div class="note">Balance beats volume: 150 varied frames beat 400 near-identical ones. If the
+    sampler keeps handing you similar poses, sample a bigger <code>--n</code> and skip the boring ones.</div>
+
+  <h2 id="howlabel">Labelling well &amp; consistently</h2>
+  <p>The model learns your convention, so be consistent — inconsistency is indistinguishable from noise.</p>
+  <ul>
+    <li><strong>Fixed anatomical definitions.</strong> head = tip of the head; thorax = body centre
+      (the tracker's anchor); abdomen&nbsp;tip = posterior tip; wingL/wingR = the <em>wing tips</em>.</li>
+    <li><strong>Left/right is the FLY's, not the image's.</strong> wingL is the fly's anatomical left
+      regardless of how it's oriented on screen. Getting this consistent is the whole ballgame for
+      wing-swap (see below).</li>
+    <li><strong>Use the dynamics scrub</strong> (<code>,</code> / <code>.</code>) to disambiguate. If
+      you can't tell head from tail or which wing is which in a still frame, step through the ±context
+      window — motion direction and how the wings move make it obvious. Then place on the anchor frame
+      (press <code>0</code>).</li>
+    <li><strong>Occluded / folded-away wings:</strong> mark the node <em>not visible</em>
+      (<code>v</code>) rather than guessing a position. A confident wrong label is worse than a
+      missing one.</li>
+    <li><strong>Skip genuinely ambiguous frames</strong> (mark bad with <code>b</code>) — debris,
+      two flies overlapping, total blur.</li>
+    <li><strong>Fix the seed, don't re-place.</strong> Points are seeded from the ellipse; nudge them.
+      Faster and more consistent than clicking cold.</li>
+  </ul>
+
+  <h2 id="wings">The wing L/R problem (our #1 issue)</h2>
+  <p>Wing-swap dominated the pilot's flags, and it will dominate yours. Attack it directly:</p>
+  <ol>
+    <li><strong>Label many wing-extended frames.</strong> Folded wings sit on the body midline where
+      L/R is genuinely ambiguous (the QC flag ignores those on purpose). The model only learns L/R
+      from frames where the wings are clearly out to the sides — so those must be well represented.</li>
+    <li><strong>Be ruthlessly consistent</strong> about which tip is wingL vs wingR (fly's frame). A
+      handful of swapped labels teaches the model to swap.</li>
+    <li><strong>Lean on the built-in symmetry.</strong> The skeleton declares <code>wingL↔wingR</code>
+      symmetric, so horizontal-flip augmentation correctly swaps them — this effectively doubles your
+      wing data <em>if</em> your labels are consistent.</li>
+    <li><strong>The <code>w</code> key</strong> in the labeller swaps the two wings on the current
+      frame — handy when you catch yourself having placed them backwards.</li>
+    <li><strong>Watch arena_02.</strong> If one arena's wing-swap stays high after others improve, its
+      optics/contrast differ — label proportionally more frames from it.</li>
+  </ol>
+  <p><strong>Head/tail flips</strong> are the same story for the body axis: label frames where the fly
+    reverses or turns hard, and use the scrub to get the direction right.</p>
+
+  <h2 id="train">Training settings</h2>
+  <p>Defaults are tuned for this setup; change them deliberately.</p>
+  <table>
+    <tr><th>flag</th><th>guidance</th></tr>
+    <tr><td><code>--epochs</code></td><td>50 for a pilot, 100–200 for a real model. With few frames, more epochs mostly overfits — add labels before adding epochs.</td></tr>
+    <tr><td><code>--batch-size</code></td><td>16 is a good default on MPS (also the fastest inference batch). Lower only if you hit memory limits.</td></tr>
+    <tr><td><code>--device</code></td><td><code>mps</code> on Apple Silicon.</td></tr>
+    <tr><td><code>--backbone</code></td><td><code>unet</code> (default) is plenty for 96&nbsp;px crops. Try <code>unet_medium_rf</code> only if a well-labelled model still underfits.</td></tr>
+    <tr><td><code>--val-fraction</code></td><td>0.1 default. The report writes <code>training_config.yaml</code> + a <code>training_log.csv</code> — watch validation loss stop improving (that's your epoch budget).</td></tr>
+    <tr><td>augmentation</td><td>brightness/contrast + rotation + translate are on by default (translate makes the model tolerant of the tracker centroid not sitting exactly on the anchor). Usually leave as-is.</td></tr>
+  </table>
+  <div class="note">Symptoms: <em>train loss low, val loss high / flags bad</em> → overfitting → add
+    diverse labels. <em>Both losses high</em> → underfitting → more epochs or a bigger backbone.</div>
+
+  <h2 id="evaluate">Evaluating: is it good yet?</h2>
+  <p>Judge on a clip the model did <strong>not</strong> train on, using QC (from
+    <code>anytrack-run --pose --qc</code> or <code>anytrack-qc --pose</code>):</p>
+  <table>
+    <tr><th>signal</th><th>good target</th></tr>
+    <tr><td>keypoint confidence (median)</td><td>&gt; ~0.8, stable over time (no long low stretches)</td></tr>
+    <tr><td><code>flag_wing_swap</code></td><td>low single digits % (was ~14% at pilot)</td></tr>
+    <tr><td><code>flag_headtail</code></td><td>≲ 1–2%</td></tr>
+    <tr><td><code>flag_low_conf</code> / <code>flag_missing</code></td><td>a few % — spikes point at hard frames to label</td></tr>
+    <tr><td>fly-cam overlay (<code>--follow</code>)</td><td>skeleton sits on the fly every frame; wings on the correct sides</td></tr>
+  </table>
+  <p><strong>Stop when the flags plateau</strong> across rounds (extra labels stop moving them) and the
+    fly-cam looks right. Then run pose on the full dataset. Check throughput/settings with
+    <code>anytrack-bench --pose</code> if speed matters.</p>
+  <div class="note good"><strong>Rule of thumb.</strong> Round 1 (~100 frames) gets you a usable model;
+    2–3 targeted rounds (~200–300 total) get you a good one. The failures the QC flags surface are
+    always the highest-value frames to label next.</div>
+
+  <h2 id="checklist">Checklist</h2>
+  <ul>
+    <li>☐ Pilot: ~100 diverse frames across all four arenas.</li>
+    <li>☐ Wing-out frames well represented; L/R consistent (fly's frame).</li>
+    <li>☐ Occluded wings marked not-visible; ambiguous frames skipped.</li>
+    <li>☐ Trained (versioned run name), inferred + QC on a held-out clip.</li>
+    <li>☐ Read <code>qc_pose_flags.parquet</code>; labelled the failure frames.</li>
+    <li>☐ Repeated until wing-swap in low single digits and the fly-cam looks right.</li>
+    <li>☐ Extra attention to arena_02 (worst optics in the pilot).</li>
+  </ul>
+
+  <p class="muted" style="margin-top:24px">See also: <a href="tutorial.html">usage guide</a> ·
+    <a href="pipeline.html">pipeline status</a>.</p>
+
+</div>
+</body>
+</html>

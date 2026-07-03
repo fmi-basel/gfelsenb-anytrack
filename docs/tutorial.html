@@ -160,7 +160,9 @@ uv run anytrack-qc \
   <h2 id="pose">3 · Pose <span class="pill">optional · Milestone B</span></h2>
   <p>Pose runs on top of a finished track: crop → keypoint model → per-frame keypoints. The workflow
     is <strong>label → train → infer</strong>. It needs the pose backend installed (see
-    <a href="#install">Install</a>).</p>
+    <a href="#install">Install</a>). For getting a <em>good</em> model (how much to label, the
+    active-learning loop, fixing wing-swap), see the
+    <a href="training-guide.html">training guide</a>.</p>
 
   <h3>3a · Label</h3>
   <p>Sample a diverse set of frames and hand-place keypoints. The GUI seeds points from the tracked
