@@ -205,17 +205,20 @@ def crop_roi_backgrounds(bg_full, rois, downscale):
     return out
 
 
-def build_stream_command(input_video, rois, downscale, fifo_paths, hwaccel_flags=None):
+def build_stream_command(input_video, rois, downscale, fifo_paths, hwaccel_flags=None, stride=1):
     """Build the decode-once FFmpeg command for the streaming path.
 
     ONE decode of the source, split into N streams, each cropped+scaled+``gray``
-    and written as raw gray video to its FIFO (``fifo_paths[roi.name]``). Returns
+    and written as raw gray video to its FIFO (``fifo_paths[roi.name]``). With
+    ``stride > 1`` a ``select`` filter emits only every Nth frame (fewer frames
+    decoded + tracked; skipped frames are interpolated downstream). Returns
     ``(cmd, results, sizes)`` where ``results`` maps roi_name → PreprocessResult
     (video_path = the FIFO) and ``sizes`` maps roi_name → scaled_size (the raw
     gray frame is ``scaled_size × scaled_size`` bytes). ``hwaccel_flags`` (e.g.
     ``["-hwaccel", "videotoolbox"]``) are inserted before ``-i``.
     """
     ffmpeg = get_ffmpeg_path()
+    stride = max(1, int(stride))
     filter_parts: List[str] = []
     output_args: List[str] = []
     results: Dict[str, PreprocessResult] = {}
@@ -241,13 +244,19 @@ def build_stream_command(input_video, rois, downscale, fifo_paths, hwaccel_flags
         )
         sizes[roi.name] = scaled_size
 
-    split = f"[0:v]split={len(rois)}" + "".join(f"[v{i}]" for i in range(len(rois)))
+    # Optional temporal subsampling: keep every Nth decoded frame (comma escaped).
+    if stride > 1:
+        head = f"[0:v]select='not(mod(n\\,{stride}))',split={len(rois)}"
+    else:
+        head = f"[0:v]split={len(rois)}"
+    split = head + "".join(f"[v{i}]" for i in range(len(rois)))
     filter_complex = ";".join([split, *filter_parts])
     cmd = [
         ffmpeg, "-y", "-nostats",
         *(hwaccel_flags or []),
         "-i", str(input_video),
         "-filter_complex", filter_complex,
+        "-vsync", "0",   # rawvideo passthrough: emit exactly the (selected) frames
         *output_args,
     ]
     return cmd, results, sizes

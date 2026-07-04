@@ -189,6 +189,8 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     ap.add_argument("--downscale", type=int, choices=[1, 2, 4], default=None,
                     help="ROI downscale factor for fast mode (overrides config).")
+    ap.add_argument("--stride", type=int, default=None,
+                    help="Track every Nth frame and interpolate the rest (streaming path; overrides config).")
     ap.add_argument("--workers", type=int, default=None,
                     help="Parallel tracking workers for fast mode (overrides config).")
     ap.add_argument("--qc", action="store_true",
@@ -223,6 +225,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         cfg.fast_mode = args.fast
     if args.downscale is not None:
         cfg.roi_downscale = args.downscale
+    if args.stride is not None:
+        cfg.track_stride = max(1, args.stride)
     if args.workers is not None:
         cfg.n_tracking_workers = args.workers
     if args.qc_full:
@@ -283,16 +287,31 @@ def main(argv: Optional[List[str]] = None) -> int:
     return 0 if n_ok else 1
 
 
+def _detect_cores() -> int:
+    """Logical cores available to this process (respects cgroup/affinity on Linux)."""
+    import os
+    try:
+        return max(1, len(os.sched_getaffinity(0)))
+    except AttributeError:  # macOS/Windows have no sched_getaffinity
+        import multiprocessing as mp
+        return max(1, mp.cpu_count())
+
+
 def _batch_concurrency(cfg, n_videos: int) -> int:
-    """Pick how many videos to process at once: ``cfg.batch_concurrency`` if set,
-    else ``cores // n_tracking_workers`` clamped to ``[1, n_videos]``. Each video
-    still uses its own worker pool, so K × per-video-workers ≈ cores."""
-    import multiprocessing as mp
+    """How many videos to process at once — adapts to the machine, tunable via config.
+
+    ``cfg.batch_concurrency`` (config file / --workers-style knob) forces the value;
+    otherwise auto = ``core_budget // n_tracking_workers`` clamped to ``[1, n]``,
+    where ``core_budget`` is ``cfg.batch_core_budget`` if set else the detected
+    logical cores. Each video still uses its own pool, so K × per-video-workers ≈
+    cores. On hybrid-core machines (Apple Silicon P+E) set ``batch_core_budget`` in
+    ``config.toml`` to tune how aggressively efficiency cores are used.
+    """
     if cfg.batch_concurrency and cfg.batch_concurrency > 0:
         return max(1, min(cfg.batch_concurrency, n_videos))
-    cores = cfg.batch_core_budget or mp.cpu_count()
+    cores = cfg.batch_core_budget or _detect_cores()
     per_video = max(1, int(getattr(cfg, "n_tracking_workers", 4) or 4))
-    return max(1, min(cores // per_video, n_videos))
+    return max(1, min(max(1, cores // per_video), n_videos))
 
 
 def _run_batch(videos, *, args, cfg, single):

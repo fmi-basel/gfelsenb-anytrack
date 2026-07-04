@@ -86,7 +86,9 @@ class AnyTrackConfig:
     use_hw_decode: bool = True      # Try hardware-accelerated FFmpeg decode (probed; silent SW fallback if unsupported)
     hw_decode_backend: str = "auto" # auto|videotoolbox|none
     batch_concurrency: int = 0      # Videos processed at once in batch mode (0 = auto from cores, 1 = sequential)
-    batch_core_budget: int = 0      # Total logical cores to target for batch concurrency (0 = cpu_count)
+    batch_core_budget: int = 0      # Cores to target for batch concurrency (0 = auto: performance cores)
+    track_stride: int = 1           # Track every Nth frame; interpolate the rest (1 = every frame). Saves decode+detection
+    detect_params_ref_downscale: int = 2  # Reference downscale the area/morph thresholds are tuned for (rescaled at other downscales)
 
     # Background adaptation (opt-in). Off by default so tracking output is
     # unchanged vs. the static GMM; enable for slowly drifting illumination.

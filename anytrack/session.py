@@ -79,7 +79,14 @@ class TrackingSession:
         # Post-process tracking result into dataframe and kinematics.
         df = self.result.to_dataframe()
         df = enforce_single_per_frame(df)
-        df = interpolate_missing(df)
+        stride = int(getattr(self.cfg, "track_stride", 1) or 1)
+        if stride > 1 and self.video.timing is not None:
+            # track_stride left gaps: reindex to every frame + interpolate.
+            from .trajectory import resample_to_frames
+            tmap = dict(zip(self.video.timing["frame"], self.video.timing["t_s"]))
+            df = resample_to_frames(df, self.video.timing["frame"], tmap)
+        else:
+            df = interpolate_missing(df)
 
         # scaling per ROI: arena diameter in pixels => px_per_mm
         roi_centers = {r.name: (r.cx, r.cy) for r in self.video.rois}

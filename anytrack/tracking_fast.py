@@ -110,6 +110,29 @@ from .tracker import CentroidTracker
 from .coordinates import scaled_to_full
 
 
+def _rescale_detect_params(cfg: AnyTrackConfig, scale: float) -> AnyTrackConfig:
+    """Rescale area/morph thresholds from the reference downscale to ``scale``.
+
+    ``expected_fly_area_min/max`` and ``morph_open/close`` are tuned in downscaled
+    pixels at ``detect_params_ref_downscale`` (default 2). At another downscale the
+    object's linear size changes by ``ref/scale``, so areas scale by that squared
+    and morph kernels linearly — keeping the detector in physical units so
+    ``roi_downscale=4`` (or 1) detects the same flies without hand-retuning.
+    """
+    import dataclasses
+    ref = int(getattr(cfg, "detect_params_ref_downscale", 2) or 2)
+    if scale == ref:
+        return cfg
+    r = ref / float(scale)
+    return dataclasses.replace(
+        cfg,
+        expected_fly_area_min=int(max(1, round(cfg.expected_fly_area_min * r * r))),
+        expected_fly_area_max=int(max(1, round(cfg.expected_fly_area_max * r * r))),
+        morph_open=int(max(1, round(cfg.morph_open * r))),
+        morph_close=int(max(1, round(cfg.morph_close * r))),
+    )
+
+
 def _track_from_frames(
     frame_iter,
     preprocess_result: PreprocessResult,
@@ -118,6 +141,7 @@ def _track_from_frames(
     bg: Optional[np.ndarray],
     on_frames: Optional[Callable[[int], None]] = None,
     return_timing: bool = False,
+    stride: int = 1,
 ):
     """Track one ROI from an iterator of **grayscale** frames against ``bg``.
 
@@ -132,10 +156,19 @@ def _track_from_frames(
     x0, y0 = preprocess_result.crop_offset
     roi = preprocess_result.original_roi
 
+    # Keep area/morph in physical units when the downscale differs from the
+    # reference the thresholds were tuned at (so downscale=4 detects correctly).
+    cfg = _rescale_detect_params(cfg, scale)
+
+    # With stride > 1 the fly moves up to stride× farther between tracked frames,
+    # so widen the max allowed jump accordingly (else the tracker rejects the real
+    # detection and drifts). Skipped frames are interpolated downstream.
+    stride = max(1, int(stride))
+
     kernel_open, kernel_close = build_morph_kernels(cfg)
     tracker = CentroidTracker(
         center_xy=(roi.r / scale, roi.r / scale),
-        max_jump=cfg.max_jump_px / scale,
+        max_jump=cfg.max_jump_px * stride / scale,
         miss_tolerance=cfg.miss_tolerance,
         use_kalman=cfg.use_kalman,
     )
@@ -149,11 +182,16 @@ def _track_from_frames(
     frame_indices = timing["frame"].values.astype(np.int32)
     t_s_values = timing["t_s"].values.astype(np.float64)
 
+    # With stride > 1 the decoder emits only every Nth frame; the k-th emitted
+    # frame is original timing row k*stride. Skipped frames are interpolated later
+    # (trajectory.resample_to_frames in the session).
+    rows = range(0, len(frame_indices), stride)
+
     n_proc = 0
     _reported = 0
     _t_track = time.perf_counter()
     it = iter(frame_iter)
-    for i in range(len(frame_indices)):
+    for i in rows:
         gray = next(it, None)
         if gray is None:
             break
@@ -385,13 +423,14 @@ def _read_exact(fh, n: int) -> Optional[bytes]:
     return buf
 
 
-def _track_roi_stream(fifo_path, w, h, pr, timing, cfg, roi_background, on_frames):
+def _track_roi_stream(fifo_path, w, h, pr, timing, cfg, roi_background, on_frames, stride=1):
     """Track one ROI by reading raw ``w×h`` gray frames from a FIFO (no cvtColor).
 
     Opens the FIFO by path — blocks until FFmpeg opens it for writing — then feeds
     frames to :func:`_track_from_frames`. When no background is supplied, buffers
     the first ``gmm_n_samples`` frames to fit the GMM, then tracks all frames.
-    Always drains any remaining bytes so FFmpeg never blocks on a full pipe.
+    With ``stride > 1`` the FIFO already carries only every Nth frame. Always
+    drains any remaining bytes so FFmpeg never blocks on a full pipe.
     """
     frame_bytes = int(w) * int(h)
     fh = open(fifo_path, "rb", buffering=0)   # blocks until the writer (ffmpeg) opens
@@ -424,7 +463,8 @@ def _track_roi_stream(fifo_path, w, h, pr, timing, cfg, roi_background, on_frame
                     return
                 yield f
 
-        return _track_from_frames(frame_iter(), pr, timing, cfg, bg, on_frames=on_frames)
+        return _track_from_frames(frame_iter(), pr, timing, cfg, bg,
+                                  on_frames=on_frames, stride=stride)
     finally:
         try:                        # drain leftover frames so ffmpeg can finish
             while fh.read(1 << 20):
@@ -439,7 +479,7 @@ def _track_roi_stream(fifo_path, w, h, pr, timing, cfg, roi_background, on_frame
 
 def _track_roi_stream_worker(args: tuple) -> FlyTrack:
     """Multiprocessing worker for the streaming path: reads its FIFO and tracks."""
-    fifo_path, w, h, pr_dict, timing_dict, cfg_dict, bg_data, shared = args
+    fifo_path, w, h, pr_dict, timing_dict, cfg_dict, bg_data, shared, stride = args
 
     from .config import AnyTrackConfig
     from .preprocess import PreprocessResult
@@ -477,7 +517,8 @@ def _track_roi_stream_worker(args: tuple) -> FlyTrack:
         bg_bytes, bg_shape, bg_dtype = bg_data
         roi_background = np.frombuffer(bg_bytes, dtype=bg_dtype).reshape(bg_shape)
 
-    return _track_roi_stream(Path(fifo_path), w, h, pr, timing, cfg, roi_background, on_frames)
+    return _track_roi_stream(Path(fifo_path), w, h, pr, timing, cfg, roi_background,
+                             on_frames, stride=stride)
 
 
 def track_parallel(
@@ -681,6 +722,7 @@ def track_video_fast_streaming(
 
     rois = list(video.rois)
     downscale = getattr(cfg, "roi_downscale", 2)
+    stride = max(1, int(getattr(cfg, "track_stride", 1) or 1))
     n_workers = len(rois)   # one reader per FIFO (mandatory — see docstring)
 
     tmpdir = Path(tempfile.mkdtemp(prefix="anytrack_stream_"))
@@ -694,13 +736,15 @@ def track_video_fast_streaming(
 
     hw = _hw_decode_flags(video.video_path, cfg)
     cmd, results, sizes = build_stream_command(
-        video.video_path, rois, downscale, fifo_paths, hwaccel_flags=hw)
+        video.video_path, rois, downscale, fifo_paths, hwaccel_flags=hw, stride=stride)
 
     if progress_hook:
         progress_hook("status", {"stage": "tracking"})
         progress_hook("tracking", {"status": "starting", "n_rois": len(rois), "n_workers": n_workers})
 
-    total_frames = int(len(video.timing) * len(rois))
+    # Only every ``stride``-th frame is decoded + tracked (rest interpolated later).
+    strided = (len(video.timing) + stride - 1) // stride
+    total_frames = int(strided * len(rois))
     fp = _FrameProgress(progress_hook, n_workers, total_frames)
 
     timing_dict = video.timing.to_dict(orient="list")
@@ -722,7 +766,7 @@ def track_video_fast_streaming(
             bg_data = (bg.tobytes(), bg.shape, str(bg.dtype))
         sz = sizes[roi.name]
         worker_args.append((str(fifo_paths[roi.name]), sz, sz, pr_dict,
-                            timing_dict, cfg_dict, bg_data, fp.shared))
+                            timing_dict, cfg_dict, bg_data, fp.shared, stride))
 
     proc = None
     stderr_chunks: List[str] = []
