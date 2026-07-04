@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="auto">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>anytrack — Performance Optimization Planning</title>
+<style>
+  :root{
+    --surface:#ffffff; --panel:#f6f7f9; --panel-2:#eef0f3; --border:#e4e7ec;
+    --ink:#1b1f27; --ink-muted:#616b7a; --accent:#2f6df6;
+    --good:#157f3c; --good-bg:#e6f4ec; --good-ink:#0f5f2d;
+    --warn:#9a6400; --warn-bg:#fbf0dc; --warn-ink:#7a4f00;
+    --bad:#b23b3b; --bad-bg:#fbe9e9; --bad-ink:#8f2d2d;
+    --plan:#66707e; --plan-bg:#eef0f3; --plan-ink:#4a5361;
+    --shadow:0 1px 2px rgba(16,24,40,.06),0 1px 3px rgba(16,24,40,.10);
+  }
+  html[data-theme="dark"]{
+    --surface:#0f1216; --panel:#171b21; --panel-2:#1e232b; --border:#262b33;
+    --ink:#e6e9ed; --ink-muted:#99a3b1; --accent:#6ea0ff;
+    --good:#46d08a; --good-bg:rgba(70,208,138,.14); --good-ink:#7fe4b0;
+    --warn:#e6ad55; --warn-bg:rgba(230,173,85,.14); --warn-ink:#f0c483;
+    --bad:#e77; --bad-bg:rgba(230,120,120,.14); --bad-ink:#f0a0a0;
+    --plan:#8a94a2; --plan-bg:rgba(138,148,162,.14); --plan-ink:#aab3c0;
+    --shadow:none;
+  }
+  @media (prefers-color-scheme: dark){
+    html[data-theme="auto"]{
+      --surface:#0f1216; --panel:#171b21; --panel-2:#1e232b; --border:#262b33;
+      --ink:#e6e9ed; --ink-muted:#99a3b1; --accent:#6ea0ff;
+      --good:#46d08a; --good-bg:rgba(70,208,138,.14); --good-ink:#7fe4b0;
+      --warn:#e6ad55; --warn-bg:rgba(230,173,85,.14); --warn-ink:#f0c483;
+      --bad:#e77; --bad-bg:rgba(230,120,120,.14); --bad-ink:#f0a0a0;
+      --plan:#8a94a2; --plan-bg:rgba(138,148,162,.14); --plan-ink:#aab3c0;
+      --shadow:none;
+    }
+  }
+  *{box-sizing:border-box}
+  body{margin:0; background:var(--surface); color:var(--ink);
+    font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    -webkit-font-smoothing:antialiased;}
+  .wrap{max-width:1020px; margin:0 auto; padding:32px 24px 80px}
+  code,.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:.9em;
+    background:var(--panel-2); padding:1px 5px; border-radius:5px}
+  a{color:var(--accent)}
+  h1{font-size:26px; margin:0 0 4px; letter-spacing:-.01em}
+  h2{font-size:16px; text-transform:uppercase; letter-spacing:.06em; color:var(--ink-muted);
+     margin:46px 0 14px; font-weight:600; border-bottom:1px solid var(--border); padding-bottom:8px}
+  h3{font-size:15px; margin:22px 0 6px}
+  .sub{color:var(--ink-muted); margin:0 0 20px; max-width:74ch}
+  .topbar{display:flex; justify-content:space-between; align-items:flex-start; gap:16px; flex-wrap:wrap}
+  .toggle{border:1px solid var(--border); background:var(--panel); color:var(--ink);
+     border-radius:8px; padding:7px 12px; cursor:pointer; font-size:13px}
+  .toggle:hover{border-color:var(--accent)}
+  .meta{color:var(--ink-muted); font-size:13px; margin:6px 0 22px}
+  p{max-width:78ch}
+
+  table{width:100%; border-collapse:collapse; font-size:13.5px; margin:10px 0}
+  th,td{text-align:left; padding:9px 12px; border-bottom:1px solid var(--border); vertical-align:top}
+  th{color:var(--ink-muted); font-weight:600; font-size:12px; text-transform:uppercase; letter-spacing:.04em}
+  tbody tr:hover{background:var(--panel)}
+  td .mono{background:none; color:var(--accent); padding:0}
+  .num{text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap}
+
+  .badge{display:inline-flex; align-items:center; gap:5px; padding:2px 9px; border-radius:999px;
+     font-size:11.5px; font-weight:700; border:1px solid transparent; white-space:nowrap}
+  .b-good{background:var(--good-bg); color:var(--good-ink); border-color:var(--good)}
+  .b-warn{background:var(--warn-bg); color:var(--warn-ink); border-color:var(--warn)}
+  .b-bad{background:var(--bad-bg); color:var(--bad-ink); border-color:var(--bad)}
+  .b-plan{background:var(--plan-bg); color:var(--plan-ink); border-color:var(--plan)}
+
+  .callout{background:var(--panel); border:1px solid var(--border); border-left:3px solid var(--accent);
+     border-radius:10px; padding:14px 16px; margin:16px 0}
+  .callout.warn{border-left-color:var(--warn)}
+  .callout.good{border-left-color:var(--good)}
+  .card{background:var(--panel); border:1px solid var(--border); border-radius:10px;
+     padding:14px 16px; margin:12px 0; box-shadow:var(--shadow)}
+  .card h3{margin-top:0}
+  .tags{display:flex; gap:8px; flex-wrap:wrap; margin:8px 0 4px}
+  ul{max-width:78ch} li{margin:4px 0}
+  .lead{font-size:15.5px}
+  footer{margin-top:52px; padding-top:18px; border-top:1px solid var(--border); color:var(--ink-muted); font-size:12.5px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="topbar">
+    <div>
+      <h1>anytrack — Performance Optimization Planning</h1>
+      <p class="sub">Where batch tracking time actually goes, what has been optimized, the hard
+        ceilings we hit (and why), and a stage-by-stage catalogue of ideas worth trying next.
+        Numbers are from an Apple M3 Pro (5 performance + 6 efficiency cores) on real
+        <span class="mono">mpeg4</span> clips (2176×2176, 4 arenas, ~18 000 frames).</p>
+    </div>
+    <button class="toggle" id="themeBtn" title="Toggle light / dark / auto">◐ Theme</button>
+  </div>
+  <div class="meta">Last updated: <strong>2026-07-04</strong> · companion to <a href="pipeline.html">pipeline.html</a></div>
+
+  <!-- ============================================================ -->
+  <h2>1 · Where the time goes</h2>
+  <p>Per video (fast mode), measured with the decode-once streaming path:</p>
+  <table>
+    <thead><tr><th>Stage</th><th class="num">Cost</th><th>Notes</th></tr></thead>
+    <tbody>
+      <tr><td>ROI detection (background GMM + Hough)</td><td class="num">~10 s</td><td>Single-threaded numpy; runs once per video today.</td></tr>
+      <tr><td>Decode (FFmpeg, software mpeg4)</td><td class="num">~7–9 s</td><td><strong>Irreducible floor</strong> for this codec — see §4.</td></tr>
+      <tr><td>Tracking loop (4 workers, detection + linking)</td><td class="num">~20 s wall</td><td>~889 fps/ROI; overlaps decode via FIFOs.</td></tr>
+      <tr><td>Per-worker background rebuild</td><td class="num">~0.5–1.3 s</td><td>Negligible; reuse is opt-in (destabilized one arena).</td></tr>
+    </tbody>
+  </table>
+  <p>Before this work, an extra <strong>~30 s of libx264 crop encoding + re-decode</strong> sat between
+    decode and tracking. That was the single biggest waste, and removing it is where most of the win came from.</p>
+
+  <!-- ============================================================ -->
+  <h2>2 · What has been optimized</h2>
+  <table>
+    <thead><tr><th>Change</th><th>Effect</th><th>Status</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Decode-once FIFO streaming</strong> — one FFmpeg decode pipes raw gray crops to N per-ROI FIFO readers; kills the crop encode + disk write + re-decode + per-frame <span class="mono">cvtColor</span>.</td><td class="num">51 → 31 s <br>(1.66×)</td><td><span class="badge b-good">shipped</span></td></tr>
+      <tr><td><strong>Cross-video concurrency</strong> — ThreadPoolExecutor over videos, K = cores ÷ workers, multi-line live UI. Core-aware &amp; config-tunable.</td><td class="num">~1.22×</td><td><span class="badge b-good">shipped</span></td></tr>
+      <tr><td><strong>Frame stride = 2</strong> (<span class="mono">--stride 2</span>) — track every other frame, interpolate the rest; <span class="mono">max_jump</span> scaled by stride.</td><td class="num">1.70× <br>(~2 px err)</td><td><span class="badge b-good">shipped, opt-in</span></td></tr>
+      <tr><td><span class="mono">cv2.setNumThreads(1)</span> per worker — stop OpenCV oversubscription across the pool.</td><td class="num">small</td><td><span class="badge b-good">shipped</span></td></tr>
+      <tr><td>Probed <span class="mono">-hwaccel videotoolbox</span> decode (cached, silent SW fallback).</td><td class="num">no-op on mpeg4</td><td><span class="badge b-good">shipped</span></td></tr>
+      <tr><td><span class="mono">roi_downscale=4</span> made correct via physical-unit rescale of area/morph thresholds.</td><td class="num">rejected*</td><td><span class="badge b-warn">opt-in, not advised</span></td></tr>
+      <tr><td>Per-ROI background reuse (crop the full-frame GMM).</td><td class="num">&lt;2%, destabilizing</td><td><span class="badge b-warn">opt-in, off</span></td></tr>
+    </tbody>
+  </table>
+  <p class="callout good"><strong>Net today:</strong> ~2× at default accuracy, or <strong>~3×</strong> single-video with
+    <span class="mono">--stride 2</span> (centroid-only, ~2 px error), on the M3 Pro. All defaults unchanged; the
+    knobs are opt-in.</p>
+
+  <!-- ============================================================ -->
+  <h2>3 · The stride × downscale matrix</h2>
+  <p>Real clip, local disk (CPU-bound), centroid RMSE vs the decode-once <span class="mono">ds2/stride1</span> baseline:</p>
+  <table>
+    <thead><tr><th>downscale</th><th>stride</th><th class="num">speedup</th><th class="num">RMSE</th><th class="num">max err</th><th>verdict</th></tr></thead>
+    <tbody>
+      <tr><td>2</td><td>1</td><td class="num">1.0×</td><td class="num">—</td><td class="num">—</td><td>baseline (default)</td></tr>
+      <tr><td>2</td><td><strong>2</strong></td><td class="num"><strong>1.70×</strong></td><td class="num"><strong>2.3 px</strong></td><td class="num">30 px</td><td><span class="badge b-good">✓ sweet spot</span></td></tr>
+      <tr><td>2</td><td>4</td><td class="num">2.26×</td><td class="num">70 px</td><td class="num">743 px</td><td><span class="badge b-bad">✗ interp breaks</span></td></tr>
+      <tr><td>2</td><td>8</td><td class="num">2.68×</td><td class="num">232 px</td><td class="num">927 px</td><td><span class="badge b-bad">✗</span></td></tr>
+      <tr><td>4</td><td>1</td><td class="num">1.65×</td><td class="num">73 px</td><td class="num">1983 px</td><td><span class="badge b-bad">✗ unstable</span></td></tr>
+      <tr><td>4</td><td>4</td><td class="num">2.73×</td><td class="num">78 px</td><td class="num">776 px</td><td><span class="badge b-bad">✗</span></td></tr>
+      <tr><td>4</td><td>8</td><td class="num">3.12×</td><td class="num">232 px</td><td class="num">927 px</td><td><span class="badge b-bad">✗</span></td></tr>
+    </tbody>
+  </table>
+  <p>Stride ≥ 4 is genuine <em>interpolation</em> error — a local-search fly turns too sharply to linearly
+    interpolate across 4+ skipped frames. <span class="mono">downscale=4</span> loses accuracy (coarse blob,
+    an ambiguous arena flips) <em>and</em> barely speeds up (see §4). Only <strong>stride = 2</strong> pays off.</p>
+
+  <!-- ============================================================ -->
+  <h2>4 · Why the ceilings exist</h2>
+
+  <h3>Decode is the floor, and it can't be cheaply skipped</h3>
+  <p>The source is <span class="mono">mpeg4</span> with <strong>GOP-12</strong>: one keyframe (I) followed by
+    11 predicted (P) frames, repeating. Each P-frame is a delta from the previous frame, so reconstructing
+    frame N requires decoding every frame back to the keyframe.</p>
+  <ul>
+    <li><strong>"Decode only every 2nd frame" is impossible</strong> for inter-coded video — the skipped frames
+      are required inputs, not independent images. FFmpeg's <span class="mono">select</span> filter reflects
+      this: it decodes everything and only <em>drops</em> afterward (no decode saving).</li>
+    <li><span class="mono">-skip_frame nokey</span> <em>can</em> skip P-frame decode, but only delivers
+      <strong>keyframes</strong> — every 12th frame here (~1.7 fps), far too sparse for tracking.</li>
+    <li>Truly independent per-Nth decode needs an <strong>all-intra codec</strong> (MJPEG/FFV1/rawvideo) where
+      every frame is a keyframe.</li>
+    <li><span class="mono">roi_downscale</span> scales <em>after</em> decode, so it shrinks the tracking pixels
+      but not the full-res decode — which is why <span class="mono">downscale=4</span> gave almost no speedup.</li>
+  </ul>
+
+  <h3>Only 5 performance cores</h3>
+  <p>The M3 Pro has 5 performance + 6 efficiency cores. A single streaming video already uses ~4 tracking
+    workers + FFmpeg on the fast cores; a second concurrent video spills onto the slow E-cores — so K=2
+    concurrency adds only ~1.22× (measured on <em>local</em> disk, so it isn't a network artifact).</p>
+
+  <p class="callout warn"><strong>Bottom line:</strong> 8–10× is not reachable on <span class="mono">mpeg4</span> +
+    this hardware. The two doors to real gains are a <strong>decode-friendly codec</strong> and
+    <strong>more performance cores</strong>. Everything in §5 is framed around that.</p>
+
+  <!-- ============================================================ -->
+  <h2>5 · Future optimization ideas, by stage</h2>
+  <p class="sub">Ranked roughly by impact ÷ effort within each stage. Tags: expected impact and effort.</p>
+
+  <div class="card">
+    <h3>Decode &amp; I/O — the current bottleneck</h3>
+    <div class="tags">
+      <span class="badge b-good">highest-impact area</span>
+    </div>
+    <ul>
+      <li><strong>Try <span class="mono">-lowres</span> for mpeg4</strong> <span class="badge b-good">high</span> <span class="badge b-plan">low effort</span> — FFmpeg's mpeg4/mpeg2/h263 decoders support <span class="mono">-lowres 1/2</span>, which decodes <em>directly</em> at ½/¼ resolution by scaling the IDCT — cheaper than full-decode-then-scale. This is the one untried lever that could actually cut <em>decode</em> cost on the current codec, and it pairs naturally with downscaled tracking. Measure decode time + tracking accuracy at <span class="mono">-lowres 1</span>.</li>
+      <li><strong>Re-encode sources to H.264/HEVC</strong> <span class="badge b-good">high</span> <span class="badge b-warn">med effort</span> — unlocks the already-built VideoToolbox hardware-decode path (a no-op on mpeg4). One-time re-encode cost amortizes if clips are analyzed more than once. Best if combined with acquisition-side changes.</li>
+      <li><strong>Acquisition-side codec</strong> <span class="badge b-good">high</span> <span class="badge b-plan">policy</span> — record in H.264 (HW-decodable) or an all-intra codec (per-Nth decode becomes possible), and at the resolution actually needed. 2176² may be more than required for centroid tracking.</li>
+      <li><strong>Staging + prefetch for network sources</strong> <span class="badge b-warn">med</span> <span class="badge b-warn">med effort</span> — <span class="mono">stage_video_locally="auto"</span> copies to local NVMe; add a background prefetch so video N+1 stages while N tracks (overlap network I/O with compute). Matters when a batch reads many cold clips over the network.</li>
+      <li><strong>Keyframe-only preview mode</strong> <span class="badge b-plan">niche</span> <span class="badge b-plan">low effort</span> — <span class="mono">-skip_frame nokey</span> for a fast ~every-12th scrub (QC preview, coarse activity check), not full tracking.</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h3>ROI detection &amp; background — big easy batch win</h3>
+    <div class="tags"><span class="badge b-good">easy batch win</span></div>
+    <ul>
+      <li><strong>Detect ROIs + background once per session, reuse across the batch</strong> <span class="badge b-good">high</span> <span class="badge b-plan">low effort</span> — arenas are fixed in a rig, so a day's clips share geometry. Skipping per-video ROI detection saves ~10 s × (N−1) videos. Add a <span class="mono">--rois-from &lt;video&gt;</span> / cached-ROI path; validate the background still matches (illumination drift → refresh).</li>
+      <li><strong>Fewer background samples</strong> <span class="badge b-plan">small</span> <span class="badge b-plan">low effort</span> — <span class="mono">gmm_n_samples</span> (100) drives both time and memory; 50–60 may suffice for a static arena.</li>
+      <li><strong>Cap BLAS threads during concurrent GMM fits</strong> <span class="badge b-plan">small</span> <span class="badge b-plan">low effort</span> — with K videos, concurrent numpy EM fits oversubscribe BLAS; set <span class="mono">OMP/OPENBLAS_NUM_THREADS</span> per worker (as we did for OpenCV).</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h3>Concurrency &amp; scheduling</h3>
+    <ul>
+      <li><strong>Pin tracking workers to performance cores</strong> <span class="badge b-warn">med</span> <span class="badge b-warn">med effort</span> — on macOS set worker thread/process QoS to <span class="mono">USER_INITIATED</span> so the scheduler prefers P-cores; on Linux use <span class="mono">sched_setaffinity</span>. Could make K=2 land on real cores instead of E-cores.</li>
+      <li><strong>Persistent worker pool across videos</strong> <span class="badge b-warn">med</span> <span class="badge b-warn">med effort</span> — under <span class="mono">spawn</span>, each video re-spawns 4 workers + a Manager; a pool reused across the batch amortizes that. Matters most for many short clips.</li>
+      <li><strong>Stage-pipelined scheduler</strong> <span class="badge b-warn">med</span> <span class="badge b-bad">high effort</span> — instead of K independent full pipelines, explicitly overlap video A's decode with video B's tracking (producer/consumer across stages) to fill cores more evenly than coarse per-video threads.</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h3>Detection hot loop</h3>
+    <div class="tags"><span class="badge b-plan">already ~889 fps/ROI — low priority</span></div>
+    <ul>
+      <li>Reuse pre-allocated cv2 output buffers (<span class="mono">dst=</span>) for subtract/threshold/morph to cut per-frame allocations.</li>
+      <li>Collapse the two morphology passes (open 3×3 + close 5×5) to one where the mask is clean enough.</li>
+      <li>Skip <span class="mono">centroid_contrast</span> when QC diagnostics aren't requested.</li>
+      <li>OpenCL/UMat or Metal for diff+threshold+morph — likely not worth it at current speed unless resolution grows.</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h3>Pose stage (when enabled)</h3>
+    <ul>
+      <li><strong>Larger MPS batches across ROIs &amp; videos</strong> <span class="badge b-good">high</span> — the crop-batch inference is throughput-bound on batch size; feed the GPU wider batches (already benchmarked device×batch×every_n).</li>
+      <li><strong>Overlap pose with tracking</strong> <span class="badge b-warn">med</span> — run keypoint inference on completed crops while later frames still track, instead of a serial post-pass.</li>
+      <li><span class="mono">pose_every_n</span> + interpolation (already available) — the same speed/accuracy trade as frame stride, but for keypoints.</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h3>Hardware</h3>
+    <ul>
+      <li><strong>More performance cores</strong> <span class="badge b-good">high</span> — M-series Max/Ultra or a many-core workstation lifts the concurrency ceiling directly (K scales with fast cores).</li>
+      <li><strong>GPU decode</strong> <span class="badge b-good">high</span> — NVIDIA NVDEC (Linux, h264/hevc) or VideoToolbox (macOS, h264/hevc) offloads decode entirely; needs a HW-decodable codec (ties back to §5 decode).</li>
+    </ul>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>6 · Prioritized next steps</h2>
+  <table>
+    <thead><tr><th>#</th><th>Try</th><th>Why</th><th class="num">Expected</th><th>Effort</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td><span class="mono">-lowres 1</span> mpeg4 decode</td><td>Only lever that cuts <em>decode</em> on the current codec; pairs with downscaled tracking.</td><td class="num">decode ~½</td><td><span class="badge b-plan">low</span></td></tr>
+      <tr><td>2</td><td>Reuse ROIs+bg across a batch</td><td>Saves ~10 s × (N−1); arenas are fixed in a rig.</td><td class="num">big on batch</td><td><span class="badge b-plan">low</span></td></tr>
+      <tr><td>3</td><td>Ship <span class="mono">--stride 2</span> in routine use</td><td>Proven 1.70×, ~2 px, for centroid/kinematics work.</td><td class="num">1.7×</td><td><span class="badge b-good">done</span></td></tr>
+      <tr><td>4</td><td>P-core affinity / QoS for workers</td><td>Make K=2 concurrency land on fast cores.</td><td class="num">→ ~1.5–1.8×</td><td><span class="badge b-warn">med</span></td></tr>
+      <tr><td>5</td><td>H.264 re-encode / acquisition change</td><td>Unlocks hardware decode (path already built).</td><td class="num">large</td><td><span class="badge b-warn">med/policy</span></td></tr>
+      <tr><td>6</td><td>Staging prefetch (network sources)</td><td>Overlap cold-clip I/O with compute in batch.</td><td class="num">I/O-bound only</td><td><span class="badge b-warn">med</span></td></tr>
+    </tbody>
+  </table>
+
+  <p class="callout">Re-measure any of these per machine with a batch benchmark over a directory
+    (the matrix in §3 was produced with <span class="mono">track_video_fast</span> + interpolation + centroid
+    RMSE vs baseline). Concurrency adapts automatically to core count; tune
+    <span class="mono">batch_core_budget</span> / <span class="mono">batch_concurrency</span> /
+    <span class="mono">n_tracking_workers</span> in <span class="mono">config.toml</span> per machine.</p>
+
+  <footer>anytrack performance planning · defaults unchanged, all speed knobs opt-in · see
+    <a href="pipeline.html">pipeline.html</a> for module status.</footer>
+</div>
+
+<script>
+  (function(){
+    var btn = document.getElementById('themeBtn'), root = document.documentElement,
+        order = ['auto','light','dark'];
+    function label(){ btn.textContent = '◐ ' + root.getAttribute('data-theme'); }
+    label();
+    btn.addEventListener('click', function(){
+      var i = order.indexOf(root.getAttribute('data-theme'));
+      root.setAttribute('data-theme', order[(i+1)%order.length]); label();
+    });
+  })();
+</script>
+</body>
+</html>
