@@ -34,7 +34,8 @@ from .skeleton import get_skeleton
 
 class LabelApp:
     def __init__(self, store: LabelStore, crops: Dict[int, np.ndarray], save_path: Path,
-                 zoom: float = 6.0, node_colors: Optional[Dict[str, str]] = None):
+                 zoom: float = 6.0, node_colors: Optional[Dict[str, str]] = None,
+                 master=None):
         import tkinter as tk
         from tkinter import ttk
         import ttkbootstrap as tb
@@ -59,17 +60,36 @@ class LabelApp:
         self._placing = False               # True when the press placed a new point
         self._photo = None      # keep a ref so Tk doesn't GC the image
 
-        self.root = tb.Window(themename="darkly")
-        self.root.title("anytrack — quick label")
-        self.root.minsize(760, 560)
+        # One Tk root per process; each video is a Toplevel under a shared root
+        # (batch mode passes ``master``). Creating a fresh tb.Window per video
+        # instead orphans ttkbootstrap's Style singleton on the previous root —
+        # the next window loses its theme and dead callbacks raise bgerror.
+        if master is None:
+            self.root = tb.Window(themename="darkly")   # standalone: owns the root
+            self.win = self.root
+            self._owns_root = True
+        else:
+            # Plain tk.Toplevel (correctly parented) under the shared root; the
+            # ttkbootstrap Style is global to the interpreter so ttk widgets inside
+            # stay themed. (tb.Toplevel's first arg is `title`, not master.)
+            self.root = master                          # shared session root
+            self.win = tk.Toplevel(master)
+            self._owns_root = False
+        self.win.title("anytrack — quick label")
+        self.win.minsize(760, 560)
+        self.win.protocol("WM_DELETE_WINDOW", self._on_close)
         self._ttk = ttk
         self._style = self.root.style              # ttkbootstrap Style (themed, non-native)
+        try:                                       # match the dark theme background
+            self.win.configure(background=self._style.colors.bg)
+        except Exception:
+            pass
         self._node_style_names = [self._make_node_style(i, n) for i, n in enumerate(self.nodes)]
 
         disp = int(round(self.size * self.zoom))
 
         # --- layout ----------------------------------------------------------
-        main = tb.Frame(self.root, padding=8)
+        main = tb.Frame(self.win, padding=8)
         main.pack(fill="both", expand=True)
 
         left = tb.Frame(main)
@@ -146,23 +166,23 @@ class LabelApp:
         self.canvas.bind("<Button-1>", self._on_click)
         self.canvas.bind("<B1-Motion>", self._on_drag)
         self.canvas.bind("<ButtonRelease-1>", self._on_release)
-        self.root.bind("<Left>", lambda e: self.prev())
-        self.root.bind("<Right>", lambda e: self.next())
+        self.win.bind("<Left>", lambda e: self.prev())
+        self.win.bind("<Right>", lambda e: self.next())
         # context scrub: , / . (also < / >) step through neighbor frames; 0 = anchor
-        self.root.bind("<comma>", lambda e: self._context_step(-1))
-        self.root.bind("<period>", lambda e: self._context_step(1))
-        self.root.bind("<less>", lambda e: self._context_step(-1))
-        self.root.bind("<greater>", lambda e: self._context_step(1))
-        self.root.bind("0", lambda e: self._context_reset())
-        self.root.bind("<space>", lambda e: self.confirm_next())
-        self.root.bind("v", lambda e: self._toggle_visible())
-        self.root.bind("w", lambda e: self._swap_wings())
-        self.root.bind("b", lambda e: self._toggle_bad())
-        self.root.bind("<BackSpace>", lambda e: self._clear_active())
-        self.root.bind("<Delete>", lambda e: self._clear_active())
-        self.root.bind("<Control-s>", lambda e: self.save())
+        self.win.bind("<comma>", lambda e: self._context_step(-1))
+        self.win.bind("<period>", lambda e: self._context_step(1))
+        self.win.bind("<less>", lambda e: self._context_step(-1))
+        self.win.bind("<greater>", lambda e: self._context_step(1))
+        self.win.bind("0", lambda e: self._context_reset())
+        self.win.bind("<space>", lambda e: self.confirm_next())
+        self.win.bind("v", lambda e: self._toggle_visible())
+        self.win.bind("w", lambda e: self._swap_wings())
+        self.win.bind("b", lambda e: self._toggle_bad())
+        self.win.bind("<BackSpace>", lambda e: self._clear_active())
+        self.win.bind("<Delete>", lambda e: self._clear_active())
+        self.win.bind("<Control-s>", lambda e: self.save())
         for i in range(len(self.nodes)):
-            self.root.bind(str(i + 1), lambda e, i=i: self._set_active(i))
+            self.win.bind(str(i + 1), lambda e, i=i: self._set_active(i))
 
         self._render()
 
@@ -424,8 +444,24 @@ class LabelApp:
             return
         messagebox.showinfo("Exported", f"{self.store.n_labeled()} labeled frames → {out}")
 
+    def _on_close(self):
+        """Save (best-effort) then close this video's window."""
+        try:
+            self.save()
+        except Exception:
+            pass
+        try:
+            self.win.destroy()
+        except Exception:
+            pass
+
     def run(self):
-        self.root.mainloop()
+        if self._owns_root:
+            self.root.mainloop()          # standalone: own event loop
+        else:
+            self.win.lift()               # raise + grab focus (root is hidden)
+            self.win.focus_force()
+            self.root.wait_window(self.win)   # batch: block until this Toplevel closes
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -500,29 +536,41 @@ def main(argv: Optional[List[str]] = None) -> int:
     context = max(0, int(args.context if args.context is not None
                          else getattr(cfg, "pose_label_context", 10)))
 
-    for vp in videos:
-        vp = Path(vp)
-        save_path = _labels_for(vp)
-        if save_path.exists():
-            store = LabelStore.load(save_path)
-            print(f"[{vp.name}] resuming {store.n_labeled()}/{len(store)} labeled from {save_path}")
-        else:
-            tp = _tracks_for(vp)
-            if tp is None or not Path(tp).exists():
-                print(f"[{vp.name}] skip: no tracks table ({tp})")
-                continue
-            df = _load_tracks(Path(tp))
-            store = LabelStore.from_tracks(
-                str(vp), df, skeleton=get_skeleton(cfg), crop_size=cfg.crop_size,
-                n=args.n, strategy=args.strategy, seed=args.seed,
-                seed_ellipse=not args.no_seed_ellipse)
-            print(f"[{vp.name}] sampled {len(store)} frames ({args.strategy}) from {tp}")
+    # One shared Tk root for the whole session; each video labels in a Toplevel
+    # under it. (A fresh window per video crashes ttkbootstrap — see LabelApp.)
+    import ttkbootstrap as tb
+    root = tb.Window(themename="darkly")
+    root.withdraw()
+    try:
+        for vp in videos:
+            vp = Path(vp)
+            save_path = _labels_for(vp)
+            if save_path.exists():
+                store = LabelStore.load(save_path)
+                print(f"[{vp.name}] resuming {store.n_labeled()}/{len(store)} labeled from {save_path}")
+            else:
+                tp = _tracks_for(vp)
+                if tp is None or not Path(tp).exists():
+                    print(f"[{vp.name}] skip: no tracks table ({tp})")
+                    continue
+                df = _load_tracks(Path(tp))
+                store = LabelStore.from_tracks(
+                    str(vp), df, skeleton=get_skeleton(cfg), crop_size=cfg.crop_size,
+                    n=args.n, strategy=args.strategy, seed=args.seed,
+                    seed_ellipse=not args.no_seed_ellipse)
+                print(f"[{vp.name}] sampled {len(store)} frames ({args.strategy}) from {tp}")
 
-        print(f"[{vp.name}] extracting crops (+/-{context} context frames per sample)…")
-        crops = extract_label_crops(vp, store.frames, store.crop_size,
-                                    pad=cfg.crop_pad_mode, context=context, show_progress=True)
-        colors = resolve_node_colors(store.skeleton.nodes, getattr(cfg, "pose_node_colors", ""))
-        LabelApp(store, crops, save_path, zoom=args.zoom, node_colors=colors).run()
+            print(f"[{vp.name}] extracting crops (+/-{context} context frames per sample)…")
+            crops = extract_label_crops(vp, store.frames, store.crop_size,
+                                        pad=cfg.crop_pad_mode, context=context, show_progress=True)
+            colors = resolve_node_colors(store.skeleton.nodes, getattr(cfg, "pose_node_colors", ""))
+            LabelApp(store, crops, save_path, zoom=args.zoom,
+                     node_colors=colors, master=root).run()
+    finally:
+        try:
+            root.destroy()
+        except Exception:
+            pass
     return 0
 
 
