@@ -1044,8 +1044,98 @@ def run_qc(
     }
 
 
+def _qc_tracks_for(v, args, single: bool):
+    """Resolve the tracks table for a video. Single: ``--tracks`` verbatim (a
+    file). Batch (``--tracks`` is a dir): ``<stem>_tracks.parquet`` inside it."""
+    if single:
+        return args.tracks
+    return Path(args.tracks) / f"{Path(v).stem}_tracks.parquet"
+
+
+def _qc_pose_for(v, args, single: bool):
+    """Resolve the optional pose table (mirrors :func:`_qc_tracks_for`)."""
+    if args.pose is None:
+        return None
+    if single:
+        return args.pose
+    return Path(args.pose) / f"{Path(v).stem}_pose.parquet"
+
+
+def _qc_out_for(v, args, cfg, single: bool) -> Path:
+    """QC output dir: single → the base dir; batch → ``<base>/<stem>_qc``."""
+    base = Path(args.out_dir or (Path(getattr(cfg, "output_dir", "") or ".") / "qc"))
+    return base if single else base / f"{Path(v).stem}_qc"
+
+
+def _qc_one(video_path, idx: int, n: int, *, args, cfg, single: bool):
+    """QC one video; return the run_qc result dict (or None on skip/failure).
+
+    Batch mode (``n > 1``) renders a compact animated per-video line; single mode
+    keeps the verbose written-to listing. Serial by design — QC plotting
+    (matplotlib) + frame annotation run in-process, so they don't thread-parallel
+    the way tracking's subprocess pool does.
+    """
+    from types import SimpleNamespace
+    batch = n > 1
+    bp = None
+    if batch:
+        from .cli_progress import BatchProgress
+        bp = BatchProgress(idx, n, Path(video_path).name)
+
+    tp = _qc_tracks_for(video_path, args, single)
+    if tp is None or not Path(tp).exists():
+        msg = f"skip: no tracks ({Path(tp).name if tp else '—'})"
+        bp.finish(msg, ok=False) if bp else print(f"{Path(video_path).name}: {msg}")
+        return None
+
+    if batch:
+        bp.phase("qc", "reading tracks…")
+    df = _read_tracks(tp)
+    pose_df = None
+    pp = _qc_pose_for(video_path, args, single)
+    if pp is not None and Path(pp).exists():
+        pose_df = _read_tracks(pp)
+
+    cap = cv2.VideoCapture(str(video_path))
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    nfr = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    cap.release()
+    video = SimpleNamespace(video_path=Path(video_path), width=w, height=h,
+                            frame_count=nfr, fps_nominal=fps, rois=[])
+
+    out_dir = _qc_out_for(video_path, args, cfg, single)
+    if batch:
+        bp.phase("qc", "overlay…" if not args.no_overlay else "plots…")
+    res = run_qc(video, df, cfg, out_dir, overlay=not args.no_overlay,
+                 max_frames=args.max_frames, show_progress=not batch, pose_df=pose_df,
+                 crop_roi=args.crop_roi, follow=args.follow, follow_size=args.follow_size,
+                 crop_output_size=args.crop_size)
+
+    if batch:
+        ov = (f"{res['overlay_frames']} overlay frames" if res.get("overlay_path")
+              else ("plots only" if args.no_overlay else "overlay skipped"))
+        bp.finish(f"{len(res['plots'])} plots · {ov} → {out_dir.name}")
+    else:
+        print(f"QC written to {out_dir}")
+        print(f"  summary: {res['summary_path']}")
+        print(f"  flags:   {res['flags_path']}")
+        for p in res["plots"]:
+            print(f"  plot:    {p}")
+        if res["overlay_path"] is not None:
+            print(f"  overlay: {res['overlay_path']} ({res['overlay_frames']} frames)")
+        elif not args.no_overlay:
+            print("  overlay: skipped (no mp4 encoder available)")
+    return res
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     """CLI: generate QC artifacts from a finished tracking run (A9).
+
+    ``--video`` is a single file or a **directory** (batch): the tracks/pose/out
+    args are then directories and each video resolves to ``<stem>_tracks.parquet``
+    / ``<stem>_pose.parquet`` / ``<base>/<stem>_qc`` (mirrors anytrack-run/-label).
 
     Loads a tracks table + the source video and writes overlay/plots/flags/
     summary into an output directory. Arena circles in the overlay require ROI
@@ -1053,7 +1143,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     them; the CLI still draws centroids, trails, flags, and all metrics.
     """
     import argparse
-    from types import SimpleNamespace
     from .config import load_config
 
     ap = argparse.ArgumentParser(
@@ -1091,42 +1180,51 @@ def main(argv: Optional[List[str]] = None) -> int:
         cfg.qc_overlay_crf = 16
     if args.overlay_stride is not None:  # explicit stride wins over --qc-full
         cfg.qc_overlay_stride = max(1, args.overlay_stride)
-    if not args.video.exists():
-        ap.error(f"video not found: {args.video}")
-    if not args.tracks.exists():
-        ap.error(f"tracks not found: {args.tracks}")
 
-    df = _read_tracks(args.tracks)
-    pose_df = None
-    if args.pose is not None:
-        if not args.pose.exists():
+    from .video_select import resolve_videos, validate_openable
+
+    # --video may be a single file (unchanged) or a directory (batch mode). In
+    # batch mode --tracks/--pose/--out-dir are directories, resolved per video.
+    single = not Path(args.video).is_dir()
+    if single:
+        if not args.video.exists():
+            ap.error(f"video not found: {args.video}")
+        if not args.tracks.exists():
+            ap.error(f"tracks not found: {args.tracks}")
+        if args.pose is not None and not args.pose.exists():
             ap.error(f"pose table not found: {args.pose}")
-        pose_df = _read_tracks(args.pose)
+    else:
+        if Path(args.tracks).suffix.lower() in (".parquet", ".pq", ".csv"):
+            ap.error("batch mode (--video is a directory): --tracks must be a directory")
+        if args.pose is not None and Path(args.pose).suffix.lower() in (".parquet", ".pq", ".csv"):
+            ap.error("batch mode (--video is a directory): --pose must be a directory")
 
-    cap = cv2.VideoCapture(str(args.video))
-    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    cap.release()
-    video = SimpleNamespace(video_path=args.video, width=w, height=h, frame_count=n,
-                            fps_nominal=fps, rois=[])
+    def _validator(v):
+        ok, reason = validate_openable(v)
+        if not ok:
+            return False, reason
+        tp = _qc_tracks_for(v, args, single=False)
+        return (True, reason) if (tp and Path(tp).exists()) else (False, "no tracks")
 
-    out_dir = args.out_dir or (Path(getattr(cfg, "output_dir", "") or ".") / "qc")
-    res = run_qc(video, df, cfg, out_dir, overlay=not args.no_overlay,
-                 max_frames=args.max_frames, show_progress=True, pose_df=pose_df,
-                 crop_roi=args.crop_roi, follow=args.follow, follow_size=args.follow_size,
-                 crop_output_size=args.crop_size)
+    videos = resolve_videos(args.video, _validator)
+    if not videos:
+        ap.error(f"no videos to QC for {args.video}")
 
-    print(f"QC written to {out_dir}")
-    print(f"  summary: {res['summary_path']}")
-    print(f"  flags:   {res['flags_path']}")
-    for p in res["plots"]:
-        print(f"  plot:    {p}")
-    if res["overlay_path"] is not None:
-        print(f"  overlay: {res['overlay_path']} ({res['overlay_frames']} frames)")
-    elif not args.no_overlay:
-        print("  overlay: skipped (no mp4 encoder available)")
+    n = len(videos)
+    if n == 1:
+        return 0 if _qc_one(videos[0], 1, 1, args=args, cfg=cfg, single=single) is not None else 1
+
+    # Batch: banner + per-video animated line + summary. Serial (QC plotting +
+    # annotation are in-process / matplotlib is not thread-safe).
+    import time
+    from .cli_progress import batch_banner, header, _fmt_dt
+    batch_banner(n, "QC")
+    t0 = time.perf_counter()
+    results = [_qc_one(v, i + 1, n, args=args, cfg=cfg, single=single)
+               for i, v in enumerate(videos)]
+    n_ok = sum(1 for r in results if r is not None)
+    header(f"QC done — {n_ok}/{n} video(s) in {_fmt_dt(time.perf_counter() - t0)}")
+    return 0 if n_ok else 1
     return 0
 
 
