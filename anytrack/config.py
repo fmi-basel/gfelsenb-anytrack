@@ -86,6 +86,8 @@ class AnyTrackConfig:
     bg_deghost: bool = True          # Lift a baked-in fly (very-long-dwell blind spot) to arena brightness via a fixture-safe near-max pass
     bg_deghost_percentile: float = 98  # Per-pixel near-max used to recover the arena where a fly baked in (robust to a fly that leaves >~2% of frames)
     bg_deghost_margin: int = 15      # Only lift pixels this many gray levels darker than their near-max (≈ thr_fixed; ignores clean arena + true dark fixtures)
+    qc_edge_pinned_frac: float = 0.9   # QC: flag a ROI edge-pinned if the fly is in the outer arena (r>0.85R) this fraction of frames
+    qc_low_activity_mm_s: float = 0.05 # QC: flag a ROI low-activity if mean speed is below this (mm/s)
     use_hw_decode: bool = True      # Try hardware-accelerated FFmpeg decode (probed; silent SW fallback if unsupported)
     hw_decode_backend: str = "auto" # auto|videotoolbox|none
     batch_concurrency: int = 0      # Videos processed at once in batch mode (0 = auto from cores, 1 = sequential)

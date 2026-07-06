@@ -137,6 +137,10 @@ def summarize(df: pd.DataFrame, video, cfg) -> Dict[str, Any]:
     flagged = compute_flags(df, video, cfg)
     miss = missing_report(df, video)
 
+    roi_r = {r.name: float(r.r) for r in (getattr(video, "rois", None) or [])}
+    wall_thr = float(getattr(cfg, "qc_edge_pinned_frac", 0.9))
+    lowact_thr = float(getattr(cfg, "qc_low_activity_mm_s", 0.05))
+
     per_roi: Dict[str, Dict[str, Any]] = {}
     for roi, g in flagged.groupby("roi"):
         stats: Dict[str, Any] = dict(miss.get(str(roi), {}))
@@ -145,15 +149,26 @@ def summarize(df: pd.DataFrame, video, cfg) -> Dict[str, Any]:
         if "speed_mm_s" in g.columns:
             stats["speed_mm_s_mean"] = float(g["speed_mm_s"].mean())
             stats["speed_mm_s_max"] = float(g["speed_mm_s"].max())
+            stats["low_activity"] = bool(g["speed_mm_s"].mean() < lowact_thr)
         if "area" in g.columns:
             stats["area_mean"] = float(g["area"].mean())
         if "contrast" in g.columns:
             stats["contrast_mean"] = float(g["contrast"].mean())
+        # Edge-pinned: fly spends >wall_thr of frames in the outer arena (a fly
+        # parked at the wall the whole clip → inactive fly or a stuck/edge-pinned
+        # track; also un-removable from the background — see background_methods.html).
+        rr = roi_r.get(str(roi))
+        if rr and "r_center_px" in g.columns:
+            wall = float((g["r_center_px"] > 0.85 * rr).mean())
+            stats["wall_fraction"] = wall
+            stats["edge_pinned"] = bool(wall > wall_thr)
         per_roi[str(roi)] = stats
 
     return {
         "n_rois": int(df["roi"].nunique()) if not df.empty else 0,
         "n_frames": int(getattr(video, "frame_count", 0) or 0),
+        "n_edge_pinned": sum(1 for s in per_roi.values() if s.get("edge_pinned")),
+        "n_low_activity": sum(1 for s in per_roi.values() if s.get("low_activity")),
         "per_roi": per_roi,
     }
 

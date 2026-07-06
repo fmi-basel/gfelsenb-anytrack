@@ -250,3 +250,27 @@ def test_qc_cli(tmp_path):
     assert (out_dir / "qc_summary.json").exists()
     assert (out_dir / "qc_flags.parquet").exists()
     assert (out_dir / "qc_diagnostics.png").exists()
+
+
+def test_summarize_flags_edge_pinned_and_low_activity():
+    """A ROI whose fly stays at the wall (r>0.85R) for ~all frames with ~zero
+    speed is flagged edge_pinned + low_activity; an active interior ROI is not."""
+    from anytrack.models import CircleROI
+    cfg = AnyTrackConfig()
+    n, R = 200, 100.0
+    rows = []
+    for f in range(n):
+        rows.append(dict(roi="arena_01", track_id=1, frame=f, x=0.0, y=0.0,
+                         r_center_px=0.95 * R, speed_mm_s=0.0))
+        rows.append(dict(roi="arena_02", track_id=1, frame=f, x=0.0, y=0.0,
+                         r_center_px=0.30 * R, speed_mm_s=2.0))
+    df = pd.DataFrame(rows)
+    video = SimpleNamespace(
+        rois=[CircleROI(name="arena_01", cx=0, cy=0, r=R),
+              CircleROI(name="arena_02", cx=0, cy=0, r=R)],
+        frame_count=n, width=0, height=0)
+    s = summarize(df, video, cfg)
+    assert s["n_edge_pinned"] == 1 and s["n_low_activity"] == 1
+    a1, a2 = s["per_roi"]["arena_01"], s["per_roi"]["arena_02"]
+    assert a1["edge_pinned"] and a1["low_activity"] and a1["wall_fraction"] == 1.0
+    assert not a2["edge_pinned"] and not a2["low_activity"]
