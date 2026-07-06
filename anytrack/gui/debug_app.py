@@ -35,7 +35,7 @@ from ..background import (build_background_image, sample_frames_uniformly,
 from ..roi import detect_circular_rois
 from ..preprocess import roi_crop_geometry
 from ..detector import (compute_diff, threshold_fg, build_morph_kernels,
-                        _candidates_from_mask)
+                        _candidates_from_mask, extract_ellipses, centroid_contrast)
 from ..tracker import CentroidTracker
 from ..coordinates import scaled_to_full
 from ..tracking_fast import _rescale_detect_params
@@ -61,21 +61,90 @@ def crop_roi_gray(full_gray: np.ndarray, roi: CircleROI, downscale: int) -> np.n
     return np.ascontiguousarray(crop)
 
 
-def build_roi_background(video_path, roi: CircleROI, cfg: AnyTrackConfig) -> Optional[np.ndarray]:
-    """Per-ROI GMM background from uniform cv2 samples (self-consistent with the
-    cv2-decoded frames this GUI displays). Returns scaled-local uint8 or None."""
-    try:
-        samples = sample_frames_uniformly(str(video_path), cfg.gmm_n_samples)  # (N,H,W)
-    except Exception:
-        return None
+BG_METHODS = ["gmm", "percentile", "fg_excluded"]
+
+
+def roi_uniform_samples(video_path, roi: CircleROI, cfg: AnyTrackConfig):
+    """(stack, frame_indices): uniform cv2 samples cropped+downscaled to the ROI.
+    ``frame_indices[k]`` is the source frame of ``stack[k]`` (for fg-exclusion)."""
+    cap = cv2.VideoCapture(str(video_path))
+    n_total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    cap.release()
+    samples = sample_frames_uniformly(str(video_path), cfg.gmm_n_samples)  # (N,H,W)
+    idxs = np.linspace(0, max(0, n_total - 1), cfg.gmm_n_samples, dtype=int)[:len(samples)]
     stack = np.stack([crop_roi_gray(g, roi, cfg.roi_downscale) for g in samples])
+    return stack, idxs
+
+
+def _bg_from_stack(stack: np.ndarray, cfg: AnyTrackConfig, method: str, percentile: float):
+    if method == "percentile":
+        return np.ascontiguousarray(np.percentile(stack, percentile, axis=0).astype(np.uint8))
+    gmm, _ = fit_gmm_background(stack, bic_improvement=cfg.gmm_bic_improvement,
+                                lowp=cfg.gmm_lowp, min_std=cfg.gmm_min_std,
+                                reg_covar=cfg.gmm_reg_covar)
+    return np.ascontiguousarray(gmm)
+
+
+def build_roi_background(video_path, roi: CircleROI, cfg: AnyTrackConfig,
+                         method: str = "gmm", percentile: float = 90,
+                         tracks=None) -> Optional[np.ndarray]:
+    """Per-ROI background from uniform cv2 samples (self-consistent with the
+    cv2-decoded frames this GUI displays). Returns scaled-local uint8 or None.
+
+    method: ``gmm`` (brighter-component GMM, current default) · ``percentile``
+    (per-pixel high percentile — robust to dwell, can't overshoot brighter than
+    an observed arena pixel) · ``fg_excluded`` (per-pixel percentile computed
+    only from frames where the tracked fly is far from that pixel — removes
+    dwell ghosts; needs ``tracks``, else falls back to plain percentile)."""
     try:
-        gmm, _ = fit_gmm_background(stack, bic_improvement=cfg.gmm_bic_improvement,
-                                    lowp=cfg.gmm_lowp, min_std=cfg.gmm_min_std,
-                                    reg_covar=cfg.gmm_reg_covar)
-        return np.ascontiguousarray(gmm)
+        stack, idxs = roi_uniform_samples(video_path, roi, cfg)
     except Exception:
         return None
+    try:
+        if method == "fg_excluded":
+            return _bg_fg_excluded(stack, idxs, cfg, tracks, percentile)
+        return _bg_from_stack(stack, cfg, method, percentile)
+    except Exception:
+        return None
+
+
+def _bg_fg_excluded(stack, idxs, cfg, tracks, percentile, radius=None):
+    """Per-pixel percentile with the tracked fly masked out of each sample."""
+    if tracks is None or not len(tracks):
+        return _bg_from_stack(stack, cfg, "percentile", percentile)
+    scale = float(cfg.roi_downscale)
+    sc = stack.shape[1]
+    if radius is None:
+        radius = int(max(6, getattr(cfg, "bg_protect_radius_px", 24) / scale))
+    tf = tracks.set_index("frame")
+    fstack = stack.astype(np.float32)
+    yy, xx = np.mgrid[0:sc, 0:sc]
+    for k, fidx in enumerate(idxs):
+        if int(fidx) in tf.index:
+            r = tf.loc[int(fidx)]
+            m = (xx - float(r["xs"])) ** 2 + (yy - float(r["ys"])) ** 2 <= radius * radius
+            fstack[k][m] = np.nan
+    bg = np.nanpercentile(fstack, percentile, axis=0)
+    nan = np.isnan(bg)
+    if nan.any():                                   # pixel always covered → plain percentile
+        bg[nan] = np.percentile(stack, percentile, axis=0)[nan]
+    return np.ascontiguousarray(bg.astype(np.uint8))
+
+
+def _pick_candidates(cands, contrasts, pred, max_jump_scaled, contrast_gate, darkness_weight):
+    """Gate low-contrast candidates and, if darkness_weight>0, reduce to the single
+    best-scoring one; return the list to hand to CentroidTracker.step (which then
+    picks nearest-to-prediction among survivors). gate=weight=0 → unchanged."""
+    kept = [(c, ct) for c, ct in zip(cands, contrasts)
+            if not (contrast_gate > 0 and (ct != ct or ct < contrast_gate))]
+    if not kept or darkness_weight <= 0 or pred is None:
+        return [c for c, _ in kept]
+    cmax = max((ct for _, ct in kept if ct == ct), default=1.0) or 1.0
+
+    def score(c, ct):
+        d = np.hypot(c.x - pred[0], c.y - pred[1]) / max(1e-6, max_jump_scaled)
+        return d - darkness_weight * ((ct / cmax) if ct == ct else 0.0)
+    return [min(kept, key=lambda t: score(*t))[0]]
 
 
 def detect_stages(roi_gray: np.ndarray, bg: np.ndarray, cfg: AnyTrackConfig) -> dict:
@@ -90,16 +159,22 @@ def detect_stages(roi_gray: np.ndarray, bg: np.ndarray, cfg: AnyTrackConfig) -> 
 
 
 def track_roi(video_path, roi: CircleROI, bg: np.ndarray, cfg: AnyTrackConfig,
-              progress=None) -> pd.DataFrame:
+              progress=None, contrast_gate: float = 0.0,
+              darkness_weight: float = 0.0) -> pd.DataFrame:
     """Detect + link one arena over the whole video (cv2 frames), mirroring
     tracking_fast._track_from_frames. Returns per-frame rows with scaled-local
-    (xs, ys) for overlay, full-frame (x, y), n_candidates and jump distance."""
+    (xs, ys) for overlay, full-frame (x, y), n_candidates and jump distance.
+
+    ``contrast_gate`` drops candidates whose background-diff contrast is below it
+    (kills faint dwell ghosts); ``darkness_weight`` biases the pick toward the
+    darkest/highest-contrast candidate. Both 0 → production behaviour."""
     scale = float(cfg.roi_downscale)
     _, x0, y0, _ = roi_crop_geometry(roi, cfg.roi_downscale)
     rcfg = _rescale_detect_params(cfg, scale)
     kopen, kclose = build_morph_kernels(rcfg)
+    max_jump_scaled = rcfg.max_jump_px / scale
     tracker = CentroidTracker(center_xy=(roi.r / scale, roi.r / scale),
-                              max_jump=rcfg.max_jump_px / scale,
+                              max_jump=max_jump_scaled,
                               miss_tolerance=rcfg.miss_tolerance,
                               use_kalman=rcfg.use_kalman)
     cap = cv2.VideoCapture(str(video_path))
@@ -113,9 +188,11 @@ def track_roi(video_path, roi: CircleROI, bg: np.ndarray, cfg: AnyTrackConfig,
             break
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
         roi_gray = crop_roi_gray(gray, roi, cfg.roi_downscale)
-        from ..detector import extract_ellipses
         cands = extract_ellipses(roi_gray, bg, rcfg, kernel_open=kopen, kernel_close=kclose)
-        chosen, xf, yf = tracker.step(cands)
+        contrasts = [centroid_contrast(roi_gray, bg, c.x, c.y, rcfg) for c in cands]
+        passed = _pick_candidates(cands, contrasts, tracker.last, max_jump_scaled,
+                                  contrast_gate, darkness_weight)
+        chosen, xf, yf = tracker.step(passed)
         if chosen is not None:
             jump = float(np.hypot(xf - prev[0], yf - prev[1])) if prev else 0.0
             prev = (xf, yf)
@@ -134,16 +211,17 @@ def track_roi(video_path, roi: CircleROI, bg: np.ndarray, cfg: AnyTrackConfig,
 
 
 def track_all_rois(video_path, rois: List[CircleROI], bgs: Dict[str, np.ndarray],
-                   cfg: AnyTrackConfig, progress=None) -> Dict[str, pd.DataFrame]:
+                   cfg: AnyTrackConfig, progress=None, contrast_gate: float = 0.0,
+                   darkness_weight: float = 0.0) -> Dict[str, pd.DataFrame]:
     """Detect + link every arena in ONE decode pass (vs a full decode per arena).
 
     Each frame is decoded once, cropped to all ROIs, and fed to that ROI's
-    tracker. Same detection/linking as :func:`track_roi`. ROIs without a
-    background are skipped. Returns ``{roi_name: DataFrame}``."""
-    from ..detector import extract_ellipses
+    tracker. Same detection/linking as :func:`track_roi` (incl. contrast_gate /
+    darkness_weight). ROIs without a background are skipped."""
     scale = float(cfg.roi_downscale)
     rcfg = _rescale_detect_params(cfg, scale)
     kopen, kclose = build_morph_kernels(rcfg)
+    max_jump_scaled = rcfg.max_jump_px / scale
     state = {}
     for roi in rois:
         if bgs.get(roi.name) is None:
@@ -152,7 +230,7 @@ def track_all_rois(video_path, rois: List[CircleROI], bgs: Dict[str, np.ndarray]
         state[roi.name] = dict(
             roi=roi, x0=x0, y0=y0, bg=bgs[roi.name], prev=None, rows=[],
             tracker=CentroidTracker(center_xy=(roi.r / scale, roi.r / scale),
-                                    max_jump=rcfg.max_jump_px / scale,
+                                    max_jump=max_jump_scaled,
                                     miss_tolerance=rcfg.miss_tolerance,
                                     use_kalman=rcfg.use_kalman))
     cap = cv2.VideoCapture(str(video_path))
@@ -167,7 +245,10 @@ def track_all_rois(video_path, rois: List[CircleROI], bgs: Dict[str, np.ndarray]
         for s in state.values():
             roi_gray = crop_roi_gray(gray, s["roi"], cfg.roi_downscale)
             cands = extract_ellipses(roi_gray, s["bg"], rcfg, kernel_open=kopen, kernel_close=kclose)
-            chosen, xf, yf = s["tracker"].step(cands)
+            contrasts = [centroid_contrast(roi_gray, s["bg"], c.x, c.y, rcfg) for c in cands]
+            passed = _pick_candidates(cands, contrasts, s["tracker"].last, max_jump_scaled,
+                                      contrast_gate, darkness_weight)
+            chosen, xf, yf = s["tracker"].step(passed)
             if chosen is None:
                 continue
             jump = float(np.hypot(xf - s["prev"][0], yf - s["prev"][1])) if s["prev"] else 0.0
@@ -191,7 +272,8 @@ def _to_bgr(gray: np.ndarray) -> np.ndarray:
 
 
 def render_stage(stage: str, roi_gray: np.ndarray, bg: np.ndarray, cfg: AnyTrackConfig,
-                 tracks: Optional[pd.DataFrame], frame_idx: int, trail: int = 40) -> np.ndarray:
+                 tracks: Optional[pd.DataFrame], frame_idx: int, trail: int = 40,
+                 contrast_gate: float = 0.0) -> np.ndarray:
     """Return a BGR image for ``stage`` (scaled-ROI resolution) with overlays."""
     if stage == "raw":
         return _to_bgr(roi_gray)
@@ -205,17 +287,26 @@ def render_stage(stage: str, roi_gray: np.ndarray, bg: np.ndarray, cfg: AnyTrack
     if stage == "mask":
         return _to_bgr(st["mask"])
     if stage == "candidates":
+        # Each area-valid blob is annotated with its contrast; green = passes the
+        # contrast gate (a real fly), orange = gated out (a faint dwell ghost),
+        # red = rejected by area. Lets you dial the gate against real ghosts.
         vis = _to_bgr(roi_gray)
         cnts, _ = cv2.findContours(st["mask"], cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         for c in cnts:
             area = cv2.contourArea(c)
-            good = cfg.expected_fly_area_min <= area <= cfg.expected_fly_area_max
-            col = (0, 220, 0) if good else (0, 0, 230)   # green accepted, red rejected
-            cv2.drawContours(vis, [c], -1, col, 1, cv2.LINE_AA)
-            if good and len(c) >= 5:
-                (ex, ey), (MA, ma), ang = cv2.fitEllipse(c)
-                cv2.ellipse(vis, ((ex, ey), (MA, ma), ang), (0, 255, 255), 1, cv2.LINE_AA)
-                cv2.circle(vis, (int(ex), int(ey)), 2, (0, 255, 255), -1, cv2.LINE_AA)
+            if not (cfg.expected_fly_area_min <= area <= cfg.expected_fly_area_max):
+                cv2.drawContours(vis, [c], -1, (0, 0, 230), 1, cv2.LINE_AA)   # rejected by area
+                continue
+            if len(c) < 5:
+                continue
+            (ex, ey), (MA, ma), ang = cv2.fitEllipse(c)
+            ct = centroid_contrast(roi_gray, bg, ex, ey, cfg)
+            gated_out = contrast_gate > 0 and (ct != ct or ct < contrast_gate)
+            col = (0, 140, 255) if gated_out else (0, 220, 0)
+            cv2.ellipse(vis, ((ex, ey), (MA, ma), ang), col, 1, cv2.LINE_AA)
+            cv2.circle(vis, (int(ex), int(ey)), 2, col, -1, cv2.LINE_AA)
+            cv2.putText(vis, f"{ct:.0f}", (int(ex) + 4, int(ey) - 4),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, col, 1, cv2.LINE_AA)
         return vis
     # final: raw + tracked centroid + trail + jump marker
     vis = _to_bgr(roi_gray)
@@ -262,6 +353,10 @@ def _build_app(video_path: Path, cfg: AnyTrackConfig):
             self.geometry("1400x900")
             self.cfg0 = cfg
             self.work = dataclasses.replace(cfg)   # live-editable working config
+            # Experiment knobs for the dwell-contamination A/B (background method +
+            # candidate gating). Defaults reproduce the shipped pipeline.
+            self.opts = dict(bg_method="gmm", percentile=90,
+                             contrast_gate=0.0, darkness_weight=0.0)
             self.cap = cv2.VideoCapture(str(video_path))
             self.n = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
             self.fps = self.cap.get(cv2.CAP_PROP_FPS) or 20.0
@@ -319,6 +414,21 @@ def _build_app(video_path: Path, cfg: AnyTrackConfig):
             tb.Label(side, text="(sliders re-render this frame;\nRe-track applies to linking)",
                      font=("", 9), bootstyle="secondary").pack(pady=(8, 0))
 
+            # ---- dwell-contamination experiments ----
+            exp = tb.Labelframe(body, text="Experiments (dwell)", padding=8)
+            exp.pack(side="right", fill="y", padx=(8, 0))
+            tb.Label(exp, text="background", font=("", 9), anchor="w").pack(fill="x")
+            self.bg_method_var = tk.StringVar(value=self.opts["bg_method"])
+            bm = tb.Combobox(exp, textvariable=self.bg_method_var, values=BG_METHODS,
+                             width=13, state="readonly")
+            bm.pack(fill="x", pady=(0, 6))
+            bm.bind("<<ComboboxSelected>>", lambda e: self._on_bg_method())
+            self._add_opt_slider(exp, "percentile", 50, 99, self.opts["percentile"])
+            self._add_opt_slider(exp, "contrast_gate", 0, 60, self.opts["contrast_gate"])
+            self._add_opt_slider(exp, "darkness_weight", 0, 300, self.opts["darkness_weight"], div=100.0)
+            tb.Label(exp, text="(bg/percentile rebuild+retrack;\ncontrast_gate previews on candidates;\ngate/weight apply on Re-track)",
+                     font=("", 8), bootstyle="secondary").pack(pady=(8, 0))
+
             bot = tb.Frame(self); bot.pack(side="bottom", fill="x", padx=8, pady=6)
             self.play_btn = tb.Button(bot, text="▶", width=3, command=self._toggle_play)
             self.play_btn.pack(side="left")
@@ -334,12 +444,20 @@ def _build_app(video_path: Path, cfg: AnyTrackConfig):
             row = tb.Frame(parent); row.pack(fill="x", pady=3)
             tb.Label(row, text=name, width=20, anchor="w", font=("", 9)).pack(side="left")
             var = tk.IntVar(value=int(val))
-            lbl = tb.Label(row, textvariable=var, width=5)
-            lbl.pack(side="right")
+            tb.Label(row, textvariable=var, width=5).pack(side="right")
             s = tb.Scale(parent, from_=lo, to=hi, value=int(val), orient=HORIZONTAL,
                          command=lambda v, n=name, vr=var: self._on_param(n, float(v), vr))
             s.pack(fill="x")
             self._sliders[name] = var
+
+        def _add_opt_slider(self, parent, name, lo, hi, val, div=1.0):
+            """Slider bound to self.opts[name] (div>1 → fractional value)."""
+            row = tb.Frame(parent); row.pack(fill="x", pady=3)
+            tb.Label(row, text=name, width=16, anchor="w", font=("", 9)).pack(side="left")
+            var = tk.StringVar(value=f"{val:g}")
+            tb.Label(row, textvariable=var, width=6).pack(side="right")
+            tb.Scale(parent, from_=lo, to=hi, value=float(val) * div, orient=HORIZONTAL,
+                     command=lambda v, n=name, vr=var, d=div: self._on_opt(n, float(v) / d, vr)).pack(fill="x")
 
         # ---- worker: background + ROIs + initial tracking ----
         def _start_worker(self):
@@ -417,7 +535,8 @@ def _build_app(video_path: Path, cfg: AnyTrackConfig):
                 # Background not built yet → only "raw" is renderable; show it so the
                 # window is never blank while backgrounds/tracking are still computing.
                 stage = sv.get() if bg is not None else "raw"
-                img = render_stage(stage, roi_gray, bg, self.work, trk, self.frame_idx)
+                img = render_stage(stage, roi_gray, bg, self.work, trk, self.frame_idx,
+                                   contrast_gate=self.opts["contrast_gate"])
                 v.set_image(img)
             if bg is not None:
                 self._update_status(roi_gray, bg, trk)
@@ -451,6 +570,43 @@ def _build_app(video_path: Path, cfg: AnyTrackConfig):
                 self.work = dataclasses.replace(self.work, **{name: iv})
             self._render()
 
+        def _on_opt(self, name, value, var):
+            var.set(f"{value:g}")
+            self.opts[name] = value
+            if name == "percentile":
+                self._rebuild_bg()          # bg depends on percentile → rebuild + retrack
+            else:                            # contrast_gate previews live; both apply on Re-track
+                self._render()
+
+        def _on_bg_method(self):
+            self.opts["bg_method"] = self.bg_method_var.get()
+            self._rebuild_bg()
+
+        def _rebuild_bg(self):
+            """Rebuild the current arena's background with the selected method, then
+            re-track it (bg change ⇒ track change). Threaded."""
+            roi = self._current_roi()
+            if roi is None:
+                return
+            self.retrack_btn.configure(state="disabled")
+
+            def job():
+                m, p = self.opts["bg_method"], self.opts["percentile"]
+                self._set_status(f"rebuilding {roi.name} bg ({m})…")
+                bg = build_roi_background(video_path, roi, self.cfg0, method=m, percentile=p,
+                                          tracks=self.tracks.get(roi.name))
+                if bg is not None:
+                    self.roi_bg[roi.name] = bg
+                    self._set_status(f"re-tracking {roi.name}…")
+                    self.tracks[roi.name] = track_roi(
+                        video_path, roi, bg, self.work,
+                        contrast_gate=self.opts["contrast_gate"],
+                        darkness_weight=self.opts["darkness_weight"])
+                self.after(0, lambda: (self.retrack_btn.configure(state="normal"),
+                                       self._set_status(f"ready · {roi.name} · bg={m}"),
+                                       self._render()))
+            threading.Thread(target=job, daemon=True).start()
+
         def _retrack(self):
             roi = self._current_roi()
             if roi is None:
@@ -459,6 +615,8 @@ def _build_app(video_path: Path, cfg: AnyTrackConfig):
 
             def job():
                 df = track_roi(video_path, roi, self.roi_bg[roi.name], self.work,
+                               contrast_gate=self.opts["contrast_gate"],
+                               darkness_weight=self.opts["darkness_weight"],
                                progress=lambda i, n: self._set_status(f"re-tracking {roi.name}: {i}/{n}"))
                 self.tracks[roi.name] = df
                 self.after(0, lambda: (self.retrack_btn.configure(state="normal"), self._render()))

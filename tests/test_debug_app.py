@@ -82,6 +82,29 @@ def test_debug_core_stages_and_tracking(tmp_path):
     assert set(multi) == {roi.name} and len(multi[roi.name]) >= 40
 
 
+def test_debug_bg_methods_and_gating(tmp_path):
+    """percentile & fg_excluded backgrounds build; contrast_gate / darkness_weight
+    tracking runs (dwell-contamination A/B knobs)."""
+    vid = tmp_path / "syn.avi"
+    if not _synthetic_video(vid):
+        pytest.skip("no MJPG encoder in this OpenCV build")
+    cfg = _cfg()
+    roi = CircleROI(name="arena_01", cx=120, cy=120, r=100)
+    assert set(D.BG_METHODS) == {"gmm", "percentile", "fg_excluded"}
+
+    perc = D.build_roi_background(vid, roi, cfg, method="percentile", percentile=90)
+    assert perc is not None and perc.dtype == np.uint8 and np.median(perc) > 150
+
+    tracks = D.track_roi(vid, roi, perc, cfg)
+    fge = D.build_roi_background(vid, roi, cfg, method="fg_excluded", percentile=90, tracks=tracks)
+    assert fge is not None and fge.shape == perc.shape
+
+    # gate + darkness-weighted linking still produces a valid, monotonic track
+    gated = D.track_roi(vid, roi, perc, cfg, contrast_gate=10, darkness_weight=1.0)
+    assert len(gated) >= 30
+    assert np.corrcoef(gated["frame"].to_numpy(), gated["xs"].to_numpy())[0, 1] > 0.8
+
+
 def test_debug_background_fallback(tmp_path):
     """build_roi_background returns None on an unreadable video (worker copes)."""
     cfg = _cfg()
