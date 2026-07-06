@@ -5,8 +5,11 @@ import numpy as np
 import cv2
 import pytest
 
-from anytrack.preprocess import extract_roi_videos, check_ffmpeg_available, cleanup_roi_videos
+from anytrack.preprocess import (extract_roi_videos, check_ffmpeg_available,
+                                 cleanup_roi_videos, build_roi_backgrounds_uniform,
+                                 roi_crop_geometry)
 from anytrack.models import CircleROI
+from anytrack.config import AnyTrackConfig
 
 
 def _write_video(path, n=20, h=200, w=200):
@@ -52,3 +55,37 @@ def test_single_pass_extracts_all_rois(tmp_path):
             assert pr.scale_factor == 2.0
     finally:
         cleanup_roi_videos(res)
+
+
+@pytest.mark.skipif(not check_ffmpeg_available(), reason="ffmpeg not available")
+def test_build_roi_backgrounds_uniform_excludes_moving_fly(tmp_path):
+    """The uniform per-ROI GMM must exclude a fly that roams the arena (no bake-in),
+    and return correctly-shaped uint8 backgrounds for each ROI."""
+    vid = tmp_path / "in.avi"
+    if not _write_video(vid, n=40, h=200, w=200):  # bright arena, dark blob moves each frame
+        pytest.skip("no MJPG encoder in this OpenCV build")
+
+    cfg = AnyTrackConfig()
+    cfg.roi_downscale = 2
+    cfg.gmm_n_samples = 30
+    roi = CircleROI(name="r0", cx=50, cy=50, r=39)
+    _, _, _, scaled = roi_crop_geometry(roi, cfg.roi_downscale)
+
+    out = build_roi_backgrounds_uniform(vid, [roi], cfg)
+    assert out is not None and set(out.keys()) == {"r0"}
+    bg = out["r0"]
+    assert bg.shape == (scaled, scaled) and bg.dtype == np.uint8
+    # arena is bright (~200); the roaming dark blob (~20) must NOT be baked in:
+    assert np.median(bg) > 150
+    assert (bg < 100).mean() < 0.05  # <5% dark pixels — no persistent blob
+
+
+@pytest.mark.skipif(not check_ffmpeg_available(), reason="ffmpeg not available")
+def test_build_roi_backgrounds_uniform_fallback(tmp_path):
+    """Returns None (worker then builds its own GMM) on unreadable input / no ROIs."""
+    cfg = AnyTrackConfig()
+    roi = CircleROI(name="r0", cx=50, cy=50, r=39)
+    assert build_roi_backgrounds_uniform(tmp_path / "does_not_exist.avi", [roi], cfg) is None
+    vid = tmp_path / "ok.avi"
+    if _write_video(vid, n=10):
+        assert build_roi_backgrounds_uniform(vid, [], cfg) is None  # no ROIs

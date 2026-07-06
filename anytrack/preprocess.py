@@ -179,6 +179,80 @@ def roi_crop_geometry(roi: CircleROI, downscale: int) -> Tuple[int, int, int, in
     return crop_size, x0, y0, scaled_size
 
 
+def build_roi_backgrounds_uniform(video_path, rois, cfg):
+    """Per-ROI GMM backgrounds from uniformly-sampled ROI frames, decoded the SAME
+    way the tracker frames are.
+
+    Reproduces the file-path per-ROI GMM *within* the streaming architecture, which
+    otherwise fits its GMM on the first-100 consecutive frames — baking in a fly that
+    sits still at the start so the tracker loses it. One FFmpeg pass decodes the
+    source, keeps every ``K``-th frame (``K`` chosen for ~``gmm_n_samples`` samples
+    spread across the whole video → a roaming fly is excluded from the per-pixel GMM
+    mode), and runs each ROI through the *same* ``split → crop → scale → gray`` filter
+    used for tracking (:func:`build_stream_command`). Sampling through FFmpeg — not
+    cv2 — is essential: cv2 ``INTER_AREA`` and FFmpeg's scaler disagree by tens of
+    gray levels at the sharp arena rim, and that mismatch pins the tracker to edge
+    artifacts for flies near the boundary. Falls back to ``None`` (worker builds its
+    own GMM) if anything goes wrong. Returns ``{roi_name: uint8 (scaled, scaled)}``.
+    """
+    import numpy as np
+    import cv2
+    from .background import fit_gmm_background
+
+    if not rois:
+        return None
+    downscale = int(cfg.roi_downscale)
+    n_samples = int(cfg.gmm_n_samples)
+    try:
+        cap = cv2.VideoCapture(str(video_path))
+        n_total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        cap.release()
+        every = max(1, n_total // n_samples) if n_total > 0 else 1
+
+        tmpdir = Path(tempfile.mkdtemp(prefix="anytrack_roibg_"))
+        try:
+            ffmpeg = get_ffmpeg_path()
+            filter_parts, output_args, geom = [], [], {}
+            for i, roi in enumerate(rois):
+                crop_size, x0, y0, scaled = roi_crop_geometry(roi, downscale)
+                fstr = f"[v{i}]crop={crop_size}:{crop_size}:{x0}:{y0}"
+                if downscale > 1:
+                    fstr += f",scale={scaled}:{scaled}"
+                fstr += f",format=gray[out{i}]"
+                filter_parts.append(fstr)
+                outfile = tmpdir / f"{roi.name}.gray"
+                output_args.extend(["-map", f"[out{i}]", "-f", "rawvideo",
+                                    "-pix_fmt", "gray", str(outfile)])
+                geom[roi.name] = (scaled, outfile)
+            head = f"[0:v]select='not(mod(n\\,{every}))',split={len(rois)}"
+            split = head + "".join(f"[v{i}]" for i in range(len(rois)))
+            cmd = [ffmpeg, "-y", "-nostats", "-i", str(video_path),
+                   "-filter_complex", ";".join([split, *filter_parts]),
+                   "-vsync", "0", *output_args]
+            proc = subprocess.run(cmd, capture_output=True)
+            if proc.returncode != 0:
+                return None
+
+            out = {}
+            for name, (scaled, outfile) in geom.items():
+                raw = outfile.read_bytes()
+                fbytes = scaled * scaled
+                nfr = len(raw) // fbytes
+                if nfr == 0:
+                    return None
+                frames = np.frombuffer(raw[:nfr * fbytes], np.uint8).reshape(nfr, scaled, scaled)
+                gmm, _ = fit_gmm_background(
+                    frames, bic_improvement=cfg.gmm_bic_improvement, lowp=cfg.gmm_lowp,
+                    min_std=cfg.gmm_min_std, reg_covar=cfg.gmm_reg_covar,
+                )
+                out[name] = np.ascontiguousarray(gmm)
+            return out
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+    except Exception:
+        return None
+
+
 def crop_roi_backgrounds(bg_full, rois, downscale):
     """Per-ROI backgrounds cropped from a full-frame background (Phase 5 reuse).
 

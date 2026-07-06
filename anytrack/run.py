@@ -96,14 +96,15 @@ def _run_one(video_path, idx: int, n: int, *, args, cfg, single, group=None) -> 
     if not batch:
         ok(f"{len(video.rois)} ROI(s): {', '.join(r.name for r in video.rois)}")
 
-    # Opt-in: reuse the full-frame background per ROI (crop + downscale) so workers
-    # skip rebuilding a GMM. OFF by default — the arena-blurred full-frame bg can
-    # destabilize ambiguous arenas (measured 30+px divergence on one), and the
-    # speed payoff is <2%. Workers otherwise use their own per-worker/first-N GMM.
+    # Give the streaming path a uniformly-sampled per-ROI GMM instead of its
+    # first-100-consecutive-frames GMM (which bakes in a fly that sits still at the
+    # start → the tracker loses it). Built by sampling the whole video and
+    # cropping+downscaling per ROI *before* fitting the GMM, matching the file
+    # path exactly (downscale-then-GMM avoids arena-rim edge artifacts).
     roi_bgs = None
-    if bg_img is not None and getattr(cfg, "bg_reuse_for_roi", False):
-        from .preprocess import crop_roi_backgrounds
-        roi_bgs = crop_roi_backgrounds(bg_img, video.rois, cfg.roi_downscale)
+    if getattr(cfg, "bg_reuse_for_roi", False) and video.rois:
+        from .preprocess import build_roi_backgrounds_uniform
+        roi_bgs = build_roi_backgrounds_uniform(video.video_path, video.rois, cfg)
 
     t0 = time.perf_counter()
     session = TrackingSession(cfg=cfg, video=video)
