@@ -71,13 +71,20 @@ def test_build_roi_backgrounds_uniform_excludes_moving_fly(tmp_path):
     roi = CircleROI(name="r0", cx=50, cy=50, r=39)
     _, _, _, scaled = roi_crop_geometry(roi, cfg.roi_downscale)
 
-    out = build_roi_backgrounds_uniform(vid, [roi], cfg)
+    fly_masks = {}
+    out = build_roi_backgrounds_uniform(vid, [roi], cfg, fly_masks=fly_masks)
     assert out is not None and set(out.keys()) == {"r0"}
     bg = out["r0"]
     assert bg.shape == (scaled, scaled) and bg.dtype == np.uint8
     # arena is bright (~200); the roaming dark blob (~20) must NOT be baked in:
     assert np.median(bg) > 150
     assert (bg < 100).mean() < 0.05  # <5% dark pixels — no persistent blob
+
+    # fly_masks side-channel: same shape, boolean, and the roaming blob makes some
+    # pixels bimodal (2-component GMM) → a non-empty fly footprint.
+    m = fly_masks["r0"]
+    assert m.shape == (scaled, scaled) and m.dtype == np.bool_
+    assert m.any()
 
 
 @pytest.mark.skipif(not check_ffmpeg_available(), reason="ffmpeg not available")

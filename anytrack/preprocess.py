@@ -260,7 +260,7 @@ def _deghost_background(bg, frames, cfg):
                    fill=getattr(cfg, "bg_deghost_fill", "neighbor"))
 
 
-def build_roi_backgrounds_uniform(video_path, rois, cfg):
+def build_roi_backgrounds_uniform(video_path, rois, cfg, fly_masks=None):
     """Per-ROI GMM backgrounds from uniformly-sampled ROI frames, decoded the SAME
     way the tracker frames are.
 
@@ -275,6 +275,12 @@ def build_roi_backgrounds_uniform(video_path, rois, cfg):
     gray levels at the sharp arena rim, and that mismatch pins the tracker to edge
     artifacts for flies near the boundary. Falls back to ``None`` (worker builds its
     own GMM) if anything goes wrong. Returns ``{roi_name: uint8 (scaled, scaled)}``.
+
+    If a dict is passed as ``fly_masks``, it is populated ``{roi_name: bool
+    (scaled, scaled)}`` with the GMM two-component ("fly") mask per ROI — pixels
+    where the model fit a distinct dark mode, i.e. the footprint the fly visited
+    enough to perturb the background. Captured *before* de-ghost, so it shows what
+    the raw GMM flagged as fly (a diagnostic for the caller to overlay).
     """
     import numpy as np
     import cv2
@@ -322,10 +328,12 @@ def build_roi_backgrounds_uniform(video_path, rois, cfg):
                 if nfr == 0:
                     return None
                 frames = np.frombuffer(raw[:nfr * fbytes], np.uint8).reshape(nfr, scaled, scaled)
-                gmm, _ = fit_gmm_background(
+                gmm, thr = fit_gmm_background(
                     frames, bic_improvement=cfg.gmm_bic_improvement, lowp=cfg.gmm_lowp,
                     min_std=cfg.gmm_min_std, reg_covar=cfg.gmm_reg_covar,
                 )
+                if fly_masks is not None:   # 2-component pixels (thr not NaN) = fly footprint
+                    fly_masks[name] = np.ascontiguousarray(~np.isnan(thr))
                 if getattr(cfg, "bg_deghost", False):
                     gmm = _deghost_background(gmm, frames, cfg)
                 out[name] = np.ascontiguousarray(gmm)
