@@ -125,6 +125,30 @@ def test_deghost_lifts_fly_keeps_fixture():
     assert abs(int(dg[50, 50]) - int(bg[50, 50])) <= 2   # clean arena untouched
 
 
+def test_deghost_neighbor_fill_matches_floor_not_nearmax():
+    """neighbor fill borrows the true floor from nearby clean pixels (unbiased),
+    where the per-pixel near-max overshoots: at a dwell spot whose few fly-absent
+    frames happen to be bright glints, nearmax fills toward the glint while neighbor
+    fills to the surrounding floor level."""
+    sc, n = 100, 100
+    stack = np.full((n, sc, sc), 200, np.uint8)   # floor = 200 everywhere
+    for k in range(n):                            # fly dwells at (30,30) 90% of frames;
+        if k % 10 != 0:                           # the 10 fly-absent frames are bright
+            stack[k, 25:35, 25:35] = 20           # glints (255), so p98 overshoots
+        else:
+            stack[k, 25:35, 25:35] = 255
+
+    bg = D._bg_from_stack(stack, AnyTrackConfig(), "percentile", 90)  # bakes the fly in
+    assert bg[30, 30] < 80
+
+    near = D.deghost(bg, stack, percentile=98, margin=15, fill="nearmax")
+    nb = D.deghost(bg, stack, percentile=98, margin=15, fill="neighbor")
+    assert near[30, 30] > 230                     # near-max chases the glint
+    assert 185 <= nb[30, 30] <= 215               # neighbor ≈ true floor (200)
+    assert nb[30, 30] < near[30, 30]              # neighbor does not overshoot
+    assert abs(int(nb[50, 50]) - int(bg[50, 50])) <= 2   # clean arena untouched
+
+
 def test_build_roi_background_deghost_flag(tmp_path):
     """apply_deghost is plumbed through build_roi_background end-to-end."""
     vid = tmp_path / "syn.avi"

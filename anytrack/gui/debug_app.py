@@ -88,7 +88,8 @@ def _bg_from_stack(stack: np.ndarray, cfg: AnyTrackConfig, method: str, percenti
 def build_roi_background(video_path, roi: CircleROI, cfg: AnyTrackConfig,
                          method: str = "gmm", percentile: float = 90, tracks=None,
                          apply_deghost: bool = False, deghost_percentile: float = 98,
-                         deghost_margin: int = 15) -> Optional[np.ndarray]:
+                         deghost_margin: int = 15,
+                         deghost_fill: str = "neighbor") -> Optional[np.ndarray]:
     """Per-ROI background from uniform cv2 samples (self-consistent with the
     cv2-decoded frames this GUI displays). Returns scaled-local uint8 or None.
 
@@ -111,7 +112,7 @@ def build_roi_background(video_path, roi: CircleROI, cfg: AnyTrackConfig,
         else:
             bg = _bg_from_stack(stack, cfg, method, percentile)
         if bg is not None and apply_deghost:
-            bg = deghost(bg, stack, deghost_percentile, deghost_margin)
+            bg = deghost(bg, stack, deghost_percentile, deghost_margin, fill=deghost_fill)
         return bg
     except Exception:
         return None
@@ -365,7 +366,8 @@ def _build_app(video_path: Path, cfg: AnyTrackConfig):
             # Experiment knobs for the dwell-contamination A/B (background method +
             # candidate gating). Defaults reproduce the shipped pipeline.
             self.opts = dict(bg_method="gmm", percentile=90, contrast_gate=0.0,
-                             darkness_weight=0.0, deghost=False, deghost_margin=15)
+                             darkness_weight=0.0, deghost=False, deghost_margin=15,
+                             deghost_fill="neighbor")
             self.cap = cv2.VideoCapture(str(video_path))
             self.n = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
             self.fps = self.cap.get(cv2.CAP_PROP_FPS) or 20.0
@@ -437,6 +439,12 @@ def _build_app(video_path: Path, cfg: AnyTrackConfig):
             tb.Checkbutton(exp, text="de-ghost (lift baked-in fly)", variable=self.deghost_var,
                            bootstyle="round-toggle", command=self._on_deghost).pack(fill="x", pady=(6, 0))
             self._add_opt_slider(exp, "deghost_margin", 5, 60, self.opts["deghost_margin"])
+            tb.Label(exp, text="de-ghost fill", font=("", 9), anchor="w").pack(fill="x", pady=(4, 0))
+            self.deghost_fill_var = tk.StringVar(value=self.opts["deghost_fill"])
+            df_cb = tb.Combobox(exp, textvariable=self.deghost_fill_var, values=["neighbor", "nearmax"],
+                                width=13, state="readonly")
+            df_cb.pack(fill="x", pady=(0, 6))
+            df_cb.bind("<<ComboboxSelected>>", lambda e: self._on_deghost_fill())
             self._add_opt_slider(exp, "contrast_gate", 0, 60, self.opts["contrast_gate"])
             self._add_opt_slider(exp, "darkness_weight", 0, 300, self.opts["darkness_weight"], div=100.0)
             tb.Label(exp, text="(bg/percentile/de-ghost rebuild+retrack;\ncontrast_gate previews on candidates;\ngate/weight apply on Re-track)",
@@ -599,6 +607,11 @@ def _build_app(video_path: Path, cfg: AnyTrackConfig):
             self.opts["deghost"] = bool(self.deghost_var.get())
             self._rebuild_bg()
 
+        def _on_deghost_fill(self):
+            self.opts["deghost_fill"] = self.deghost_fill_var.get()
+            if self.opts["deghost"]:
+                self._rebuild_bg()
+
         def _rebuild_bg(self):
             """Rebuild the current arena's background with the selected method, then
             re-track it (bg change ⇒ track change). Threaded."""
@@ -613,7 +626,8 @@ def _build_app(video_path: Path, cfg: AnyTrackConfig):
                 self._set_status(f"rebuilding {roi.name} bg ({m}{', de-ghost' if dg else ''})…")
                 bg = build_roi_background(video_path, roi, self.cfg0, method=m, percentile=p,
                                           tracks=self.tracks.get(roi.name),
-                                          apply_deghost=dg, deghost_margin=self.opts["deghost_margin"])
+                                          apply_deghost=dg, deghost_margin=self.opts["deghost_margin"],
+                                          deghost_fill=self.opts["deghost_fill"])
                 if bg is not None:
                     self.roi_bg[roi.name] = bg
                     self._set_status(f"re-tracking {roi.name}…")

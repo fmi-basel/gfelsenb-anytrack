@@ -186,30 +186,78 @@ def _arena_mask(sc: int):
     return (xx - sc / 2) ** 2 + (yy - sc / 2) ** 2 <= (0.92 * sc / 2) ** 2
 
 
-def deghost(bg, stack, percentile: float = 98, margin: int = 15):
+def deghost(bg, stack, percentile: float = 98, margin: int = 15,
+            fill: str = "neighbor", fill_sigma=None):
     """Lift a baked-in dark blob (a fly the background modelling failed to exclude
     at a very-long-dwell spot) to the true arena brightness — fixture-safe.
 
-    Within the arena disk, any pixel where the per-pixel high percentile of the
-    sample ``stack`` (a robust near-max) is more than ``margin`` gray levels
-    brighter than ``bg`` is replaced with that percentile. A dwelling fly's pixel
-    is bright whenever the fly briefly leaves, so it is recovered; a genuinely
-    static dark fixture (e.g. a central port) is dark at the near-max too and is
-    left untouched, as are clean pixels. Returns a uint8 background.
+    Detection (fixture guard) is unchanged regardless of ``fill``: within the arena
+    disk, a pixel is flagged only where the per-pixel high ``percentile`` of the
+    sample ``stack`` (a robust near-max) exceeds ``bg`` by more than ``margin`` gray
+    levels. A dwelling fly's pixel is bright whenever the fly briefly leaves, so it
+    trips the gate; a genuinely static dark fixture (e.g. a central port) is dark at
+    the near-max too and is never flagged, as are clean pixels.
+
+    ``fill`` chooses the replacement value for flagged pixels:
+
+    - ``"neighbor"`` (default): a Gaussian-weighted mixture of *nearby confidently-
+      floor* pixels (inside the arena, not flagged, and not a dark fixture) — an
+      unbiased estimate of the true floor. The per-pixel near-max is estimated from
+      only the few fly-absent frames and so overshoots (see the brighter-patch
+      failure mode); borrowing from well-sampled neighbors instead fills the hole to
+      the surrounding floor level, avoiding the phantom dark candidate a too-bright
+      patch would create. ``fill_sigma`` sets the borrow radius (default ≈ the hole
+      radius). Pixels with no reachable floor neighbor fall back to the near-max.
+    - ``"nearmax"``: the original behavior — replace with the per-pixel high
+      percentile itself (kept for A/B and as the fallback).
+
+    Returns a uint8 background.
     """
     import numpy as np
+    import cv2
     sc = bg.shape[0]
+    arena = _arena_mask(sc)
     p_hi = np.percentile(stack, percentile, axis=0)
-    lift = (p_hi.astype(np.int16) - bg.astype(np.int16) > margin) & _arena_mask(sc)
+    lift = (p_hi.astype(np.int16) - bg.astype(np.int16) > margin) & arena
     out = bg.copy()
-    out[lift] = p_hi[lift].astype(np.uint8)
+    if not lift.any():
+        return out
+    if fill == "nearmax":
+        out[lift] = p_hi[lift].astype(np.uint8)
+        return out
+
+    # neighbor mixture — source only from confidently-floor pixels (drop the ghost
+    # itself and any dark fixture, so their darkness can't bleed into the fill).
+    floorish = arena & ~lift
+    src = floorish
+    if floorish.any():
+        med = float(np.median(bg[floorish]))
+        cand = floorish & (bg.astype(np.int16) >= med - margin)
+        if cand.any():
+            src = cand
+    if not src.any():                                   # nothing to borrow from
+        out[lift] = p_hi[lift].astype(np.uint8)
+        return out
+    if fill_sigma is None:                              # reach ≈ across the hole
+        r_hole = float(np.sqrt(float(lift.sum()) / np.pi))
+        fill_sigma = float(np.clip(1.5 * r_hole, 3.0, sc / 4.0))
+    known = src.astype(np.float32)
+    num = cv2.GaussianBlur(bg.astype(np.float32) * known, (0, 0), fill_sigma)
+    den = cv2.GaussianBlur(known, (0, 0), fill_sigma)
+    filled = num / np.maximum(den, 1e-6)
+    take = lift & (den > 1e-3)
+    out[take] = np.clip(np.rint(filled[take]), 0, 255).astype(np.uint8)
+    residual = lift & ~take                             # unreachable → near-max
+    if residual.any():
+        out[residual] = p_hi[residual].astype(np.uint8)
     return out
 
 
 def _deghost_background(bg, frames, cfg):
     """Config-driven :func:`deghost` for the production per-ROI background."""
     return deghost(bg, frames, getattr(cfg, "bg_deghost_percentile", 98),
-                   getattr(cfg, "bg_deghost_margin", 15))
+                   getattr(cfg, "bg_deghost_margin", 15),
+                   fill=getattr(cfg, "bg_deghost_fill", "neighbor"))
 
 
 def build_roi_backgrounds_uniform(video_path, rois, cfg):
