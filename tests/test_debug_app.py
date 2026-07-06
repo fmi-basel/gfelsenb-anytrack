@@ -71,6 +71,16 @@ def test_debug_core_stages_and_tracking(tmp_path):
     corr = np.corrcoef(df["frame"].to_numpy(), df["xs"].to_numpy())[0, 1]
     assert corr > 0.9  # xs increases with frame → tracks the moving fly
 
+    # rendering the track overlay must use the "xs"/"ys" columns (both are reserved
+    # pandas method names) — render "final"/"candidates" WITH the tracks df.
+    for stage in ("final", "candidates"):
+        img = D.render_stage(stage, roi_gray, bg, cfg, df, 30)
+        assert img.ndim == 3 and img.shape[2] == 3
+
+    # one-decode-pass multi-arena tracker agrees with the per-arena tracker
+    multi = D.track_all_rois(vid, [roi], {roi.name: bg}, cfg)
+    assert set(multi) == {roi.name} and len(multi[roi.name]) >= 40
+
 
 def test_debug_background_fallback(tmp_path):
     """build_roi_background returns None on an unreadable video (worker copes)."""

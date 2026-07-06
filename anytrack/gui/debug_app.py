@@ -133,6 +133,59 @@ def track_roi(video_path, roi: CircleROI, bg: np.ndarray, cfg: AnyTrackConfig,
     return pd.DataFrame(rows)
 
 
+def track_all_rois(video_path, rois: List[CircleROI], bgs: Dict[str, np.ndarray],
+                   cfg: AnyTrackConfig, progress=None) -> Dict[str, pd.DataFrame]:
+    """Detect + link every arena in ONE decode pass (vs a full decode per arena).
+
+    Each frame is decoded once, cropped to all ROIs, and fed to that ROI's
+    tracker. Same detection/linking as :func:`track_roi`. ROIs without a
+    background are skipped. Returns ``{roi_name: DataFrame}``."""
+    from ..detector import extract_ellipses
+    scale = float(cfg.roi_downscale)
+    rcfg = _rescale_detect_params(cfg, scale)
+    kopen, kclose = build_morph_kernels(rcfg)
+    state = {}
+    for roi in rois:
+        if bgs.get(roi.name) is None:
+            continue
+        _, x0, y0, _ = roi_crop_geometry(roi, cfg.roi_downscale)
+        state[roi.name] = dict(
+            roi=roi, x0=x0, y0=y0, bg=bgs[roi.name], prev=None, rows=[],
+            tracker=CentroidTracker(center_xy=(roi.r / scale, roi.r / scale),
+                                    max_jump=rcfg.max_jump_px / scale,
+                                    miss_tolerance=rcfg.miss_tolerance,
+                                    use_kalman=rcfg.use_kalman))
+    cap = cv2.VideoCapture(str(video_path))
+    n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = cap.get(cv2.CAP_PROP_FPS) or 20.0
+    i = 0
+    while True:
+        ok, frame = cap.read()
+        if not ok:
+            break
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
+        for s in state.values():
+            roi_gray = crop_roi_gray(gray, s["roi"], cfg.roi_downscale)
+            cands = extract_ellipses(roi_gray, s["bg"], rcfg, kernel_open=kopen, kernel_close=kclose)
+            chosen, xf, yf = s["tracker"].step(cands)
+            if chosen is None:
+                continue
+            jump = float(np.hypot(xf - s["prev"][0], yf - s["prev"][1])) if s["prev"] else 0.0
+            s["prev"] = (xf, yf)
+            xfull, yfull = scaled_to_full(xf, yf, scale, s["x0"], s["y0"])
+            s["rows"].append(dict(frame=i, t_s=i / fps, xs=float(xf), ys=float(yf),
+                                  x=float(xfull), y=float(yfull), track_id=1,
+                                  n_candidates=len(cands), area=float(chosen.area * scale * scale),
+                                  jump_px=jump * scale))
+        if progress is not None and i % 500 == 0:
+            progress(i, n)
+        i += 1
+    cap.release()
+    if progress is not None:
+        progress(n, n)
+    return {name: pd.DataFrame(s["rows"]) for name, s in state.items()}
+
+
 def _to_bgr(gray: np.ndarray) -> np.ndarray:
     return cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
 
@@ -174,8 +227,8 @@ def render_stage(stage: str, roi_gray: np.ndarray, bg: np.ndarray, cfg: AnyTrack
         cur = tracks[tracks.frame == frame_idx]
         if len(cur):
             r = cur.iloc[0]
-            c = (int(r.xs), int(r.ys))
-            jumped = r.jump_px > cfg.max_jump_px
+            c = (int(r["xs"]), int(r["ys"]))   # "xs" is a reserved DataFrame/Series method — use []
+            jumped = r["jump_px"] > cfg.max_jump_px
             cv2.circle(vis, c, 6, (0, 0, 255) if jumped else (0, 255, 0), 2, cv2.LINE_AA)
             cv2.drawMarker(vis, c, (255, 255, 255), cv2.MARKER_CROSS, 10, 1)
     return vis
@@ -240,6 +293,9 @@ def _build_app(video_path: Path, cfg: AnyTrackConfig):
                 f = tb.Frame(panes); f.pack(side="left", fill="both", expand=True, padx=(0, 4))
                 v = ZoomableImageViewer(f, on_view_change=lambda z, px, py, i=i: self._sync(i, z, px, py))
                 v.canvas.pack(fill="both", expand=True)
+                # Re-render on resize: the canvas starts at 1x1, so a render fired
+                # before layout draws nothing; this repaints once it has a real size.
+                v.canvas.bind("<Configure>", lambda e, vv=v: vv.render())
                 self.viewers.append(v)
 
             side = tb.Labelframe(body, text="Detection params", padding=8)
@@ -281,28 +337,42 @@ def _build_app(video_path: Path, cfg: AnyTrackConfig):
             threading.Thread(target=self._worker, daemon=True).start()
 
         def _worker(self):
-            self._set_status("building background + detecting arenas…")
-            bg_img = build_background_image(str(video_path), self.cfg0)
-            rois = detect_circular_rois(
-                bg_img, dp=self.cfg0.roi_hough_dp, min_dist_ratio=self.cfg0.roi_hough_min_dist_ratio,
-                param1=self.cfg0.roi_hough_param1, param2=self.cfg0.roi_hough_param2,
-                min_radius_ratio=self.cfg0.min_radius_ratio, max_radius_ratio=self.cfg0.max_radius_ratio)
-            rois = sorted(rois, key=lambda r: r.name)
-            for roi in rois:
-                self._set_status(f"background {roi.name}…")
-                self.roi_bg[roi.name] = build_roi_background(video_path, roi, self.cfg0)
-            for roi in rois:
-                self.tracks[roi.name] = track_roi(
-                    video_path, roi, self.roi_bg[roi.name], self.cfg0,
-                    progress=lambda i, n, rn=roi.name: self._set_status(f"tracking {rn}: {i}/{n}"))
-            self.rois = rois
-            self.after(0, self._on_ready)
+            # Progressive: raw view appears after ROIs (~seconds); stages after the
+            # per-ROI backgrounds; the track overlay after one shared decode pass.
+            try:
+                self._set_status("building background + detecting arenas…")
+                bg_img = build_background_image(str(video_path), self.cfg0)
+                rois = detect_circular_rois(
+                    bg_img, dp=self.cfg0.roi_hough_dp, min_dist_ratio=self.cfg0.roi_hough_min_dist_ratio,
+                    param1=self.cfg0.roi_hough_param1, param2=self.cfg0.roi_hough_param2,
+                    min_radius_ratio=self.cfg0.min_radius_ratio, max_radius_ratio=self.cfg0.max_radius_ratio)
+                rois = sorted(rois, key=lambda r: r.name)
+                if not rois:
+                    self._set_status("no arenas detected — check ROI/background settings")
+                    return
+                self.rois = rois
+                self.after(0, self._on_rois)            # show raw immediately
+                for roi in rois:
+                    self._set_status(f"building background: {roi.name}…")
+                    self.roi_bg[roi.name] = build_roi_background(video_path, roi, self.cfg0)
+                self.after(0, self._render)             # subtracted/threshold/mask/candidates now work
+                self._set_status("tracking all arenas (one decode pass)…")
+                self.tracks = track_all_rois(
+                    video_path, rois, self.roi_bg, self.cfg0,
+                    progress=lambda i, n: self._set_status(f"tracking: frame {i}/{n}"))
+                self.after(0, self._on_ready)           # final track overlay now works
+            except Exception as e:  # never leave the window blank/silent
+                import traceback; traceback.print_exc()
+                self._set_status(f"error: {type(e).__name__}: {e}")
 
-        def _on_ready(self):
+        def _on_rois(self):
             names = [r.name for r in self.rois]
             self.arena_cb.configure(values=names)
-            if names:
+            if names and not self.cur_roi:
                 self.arena_var.set(names[0]); self.cur_roi = names[0]
+            self._render()
+
+        def _on_ready(self):
             self._set_status("ready")
             self._render()
 
@@ -333,13 +403,15 @@ def _build_app(video_path: Path, cfg: AnyTrackConfig):
                 return
             roi_gray = crop_roi_gray(g, roi, self.work.roi_downscale)
             bg = self.roi_bg.get(roi.name)
-            if bg is None:
-                return
             trk = self.tracks.get(roi.name)
             for v, sv in zip(self.viewers, self.stage_vars):
-                img = render_stage(sv.get(), roi_gray, bg, self.work, trk, self.frame_idx)
+                # Background not built yet → only "raw" is renderable; show it so the
+                # window is never blank while backgrounds/tracking are still computing.
+                stage = sv.get() if bg is not None else "raw"
+                img = render_stage(stage, roi_gray, bg, self.work, trk, self.frame_idx)
                 v.set_image(img)
-            self._update_status(roi_gray, bg, trk)
+            if bg is not None:
+                self._update_status(roi_gray, bg, trk)
 
         def _update_status(self, roi_gray, bg, trk):
             st = detect_stages(roi_gray, bg, self.work)
