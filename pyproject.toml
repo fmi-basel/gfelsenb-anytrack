@@ -43,6 +43,13 @@ pose = [
 # resolver for the base project. Install it directly into the pose environment:
 #   uv pip install --prerelease=allow 'sleap-nn[torch]'
 
+# Optional Segment-Anything backend for odor-port detection (port_backend='sam').
+# The default classical detector needs nothing; this is only for extra robustness.
+#   uv pip install 'anytrack[sam]'  (plus a SAM checkpoint via cfg.sam_model_path)
+sam = [
+  "segment-anything>=1.0",
+]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

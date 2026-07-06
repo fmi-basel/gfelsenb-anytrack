@@ -163,10 +163,11 @@ def _run_one(video_path, idx: int, n: int, *, args, cfg, single, group=None) -> 
         bp.phase("roi", "detecting ROIs…")
 
     bg_only = getattr(args, "bg_only", False)
-    # Build the model background once; reuse it for ROI detection and QC (and always
-    # in --bg-only, where the backgrounds are the deliverable).
+    port_on = getattr(cfg, "port_detect_enabled", False)
+    # Build the model background once; reuse it for ROI detection, QC, port detection
+    # (and always in --bg-only, where the backgrounds are the deliverable).
     bg_img = (build_background_image(video.video_path, cfg, progress_hook=progress)
-              if (not video.rois or args.qc or bg_only) else None)
+              if (not video.rois or args.qc or bg_only or port_on) else None)
     ensure_rois(video, cfg, background=bg_img)
     if not video.rois:
         if bp is not None:
@@ -176,6 +177,17 @@ def _run_one(video_path, idx: int, n: int, *, args, cfg, single, group=None) -> 
         return None
     if not batch:
         ok(f"{len(video.rois)} ROI(s): {', '.join(r.name for r in video.rois)}")
+
+    # Odor-port detection (once per arena, on the static model background). Feeds the
+    # fly-to-port distance columns and is reported / saved as a sidecar.
+    ports = {}
+    if port_on and bg_img is not None and video.rois:
+        from .odor_port import detect_ports
+        ports = detect_ports(bg_img, video.rois, cfg)
+        if not batch:
+            miss = [r.name for r in video.rois if r.name not in ports]
+            ok(f"odor port: {len(ports)}/{len(video.rois)} arenas"
+               + (f" (none in {', '.join(miss)})" if miss else ""))
 
     # Give the streaming path a uniformly-sampled per-ROI GMM instead of its
     # first-100-consecutive-frames GMM (which bakes in a fly that sits still at the
@@ -207,6 +219,10 @@ def _run_one(video_path, idx: int, n: int, *, args, cfg, single, group=None) -> 
         if bg_flags:            # per-ROI adaptive-model diagnostics (tier / flag)
             import json
             (dst / f"{out.stem}_bg_flags.json").write_text(json.dumps(bg_flags, indent=1))
+        if ports:               # detected odor ports (full-frame px)
+            import json
+            (dst / f"{out.stem}_ports.json").write_text(
+                json.dumps({n: p.as_dict() for n, p in ports.items()}, indent=1))
         if bp is not None:
             bp.finish(f"{len(video.rois)} ROIs · backgrounds only")
         elif not batch:
@@ -223,6 +239,13 @@ def _run_one(video_path, idx: int, n: int, *, args, cfg, single, group=None) -> 
 
     out = _resolve_output_path(args.output, cfg, video)
     fmt = "csv" if out.suffix.lower() == ".csv" else None
+    if ports:                       # add fly-to-port distance + write a port sidecar
+        import json
+        from .odor_port import add_port_distance
+        add_port_distance(df, ports, video.rois, cfg)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        (out.parent / f"{out.stem}_ports.json").write_text(
+            json.dumps({n: p.as_dict() for n, p in ports.items()}, indent=1))
     write_tracks(df, out, fmt=fmt)
 
     # Optionally dump the per-ROI backgrounds that actually drove tracking (the
@@ -342,6 +365,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                          "(a whole-video motion map; near-black means nothing moved). "
                          "Written into the _roi_bg/ dir when --save-roi-bg is also set, "
                          "else next to the output. Included automatically by --bg-only.")
+    ap.add_argument("--detect-port", "--detect_port", dest="detect_port", action="store_true",
+                    help="Detect the central odor port per arena (on the model background) "
+                         "and add dist_to_port_px/mm to the tracks + a <stem>_ports.json "
+                         "sidecar. Backend from cfg.port_backend (classical | sam).")
     ap.add_argument("--bg-only", "--bg_only", dest="bg_only", action="store_true",
                     help="Only run background modelling: build the model + per-ROI "
                          "backgrounds, save them (implies --save-roi-bg, plus the "
@@ -378,6 +405,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         args.pose = True
     if args.pose:
         cfg.pose_enabled = True
+    if getattr(args, "detect_port", False):
+        cfg.port_detect_enabled = True
     if args.pose_device is not None:
         cfg.pose_device = args.pose_device
     if args.pose_every_n is not None:

@@ -146,6 +146,18 @@ class AnyTrackConfig:
     pose_headtail_flip_deg: float = 120.0
     pose_wing_extend_frac: float = 0.15  # wing lateral offset (frac of body len) to count as "extended"
 
+    # Odor-port detection (locate the central odor source per arena; adds fly-to-port
+    # distance to the tracks). Detected once per arena on the static model background.
+    port_detect_enabled: bool = False   # run port detection after ROI detection
+    port_backend: str = "classical"     # "classical" (central dark spot, no deps) | "sam" (Segment Anything, opt-in)
+    port_darkness_margin: int = 15      # gray levels a port pixel must be below the local floor
+    port_min_area: int = 12             # min port area (full-res px) — reject noise
+    port_max_area: int = 20000          # max port area (full-res px) — reject large dark regions
+    port_max_center_frac: float = 0.30  # port centroid must be within this fraction of R from the arena centre
+    sam_model_path: str = ""            # SAM checkpoint path (empty → falls back to classical)
+    sam_device: str = "auto"            # torch device for SAM: auto|mps|cuda|cpu
+    sam_variant: str = "vit_b"          # SAM model registry key (vit_b|vit_l|vit_h|mobile)
+
     # Quality control
     qc_min_contrast: float = 10.0       # flag_low_contrast when detection contrast < this
     qc_montage_max: int = 25            # max flagged-frame thumbnails in the QC montage
