@@ -260,7 +260,179 @@ def _deghost_background(bg, frames, cfg):
                    fill=getattr(cfg, "bg_deghost_fill", "neighbor"))
 
 
-def build_roi_backgrounds_uniform(video_path, rois, cfg, fly_masks=None):
+def _arena_floor(bg, arena):
+    """Robust arena floor brightness: median of the brighter half of arena pixels
+    (excludes dark fixtures / residual ghosts from the estimate)."""
+    import numpy as np
+    vals = bg[arena]
+    if vals.size == 0:
+        return float(np.median(bg))
+    med = float(np.median(vals))
+    bright = vals[vals >= med]
+    return float(np.median(bright)) if bright.size else med
+
+
+def _ghost_mask(bg, p_hi, arena, margin):
+    """Pixels inside the arena where the near-max is >``margin`` brighter than the
+    background — a fly baked in where it dwelt (recoverable: it leaves sometimes)."""
+    return ((p_hi.astype("int16") - bg.astype("int16")) > margin) & arena
+
+
+def _iterative_fill(bg, hole, iters=400, k=3):
+    """Slowly diffuse surrounding non-hole pixels into ``hole`` (Jacobi relaxation on a
+    box blur → the harmonic infill of the boundary floor). Returns a uint8 copy."""
+    import numpy as np
+    import cv2
+    if not hole.any():
+        return bg.copy()
+    f = bg.astype(np.float32)
+    ring = cv2.dilate(hole.astype(np.uint8), np.ones((5, 5), np.uint8)).astype(bool) & ~hole
+    f[hole] = float(f[ring].mean()) if ring.any() else float(f[~hole].mean())   # warm start
+    for _ in range(iters):
+        f[hole] = cv2.blur(f, (k, k))[hole]
+    out = bg.copy()
+    out[hole] = np.clip(np.rint(f[hole]), 0, 255).astype(np.uint8)
+    return out
+
+
+def fill_stationary(bg, cfg, arena_mask=None, exclude_center_frac=0.0):
+    """Recover a never-moved fly baked into ``bg`` by filling it from surrounding floor.
+
+    A perfectly-stationary fly is dark in every frame, so no temporal statistic can
+    recover the floor at its pixel (p50=p90=p98=max there). But the floor IS observed
+    in the *surrounding* pixels, so a spatial fill can: detect every compact local dark
+    spot (darker than a smooth local-floor estimate by ``bg_deghost_margin``, fly-sized),
+    then slowly diffuse the surrounding non-fly floor into it (:func:`_iterative_fill`).
+
+    This turns an un-trackable inactive fly (baked in → subtraction ≈ 0 → coverage
+    collapses) into a correctly-tracked one. Caveat: it also fills a genuine static
+    fixture of the same size/darkness (indistinguishable in one clip); the tracker
+    tolerates a static extra candidate, but ``exclude_center_frac`` can spare a central
+    rig port. Returns ``(bg_filled_uint8, n_filled_px)``.
+    """
+    import numpy as np
+    import cv2
+    sc = bg.shape[0]
+    arena = _arena_mask(sc) if arena_mask is None else arena_mask
+    lo = int(getattr(cfg, "bg_model_fill_min_area", 15))
+    hi = int(getattr(cfg, "bg_model_fill_max_area", 4000))
+    margin = int(getattr(cfg, "bg_deghost_margin", 15))
+    localfloor = cv2.GaussianBlur(bg.astype(np.float32), (0, 0), sc / 8.0)
+    darkspot = ((localfloor - bg.astype(np.float32)) > margin) & arena
+    if exclude_center_frac > 0:
+        yy, xx = np.mgrid[0:sc, 0:sc]
+        darkspot &= ((xx - sc / 2) ** 2 + (yy - sc / 2) ** 2) > (exclude_center_frac * sc / 2) ** 2
+    ncc, lbl, stats, _ = cv2.connectedComponentsWithStats(darkspot.astype(np.uint8), 8)
+    fly = np.zeros_like(darkspot)
+    for c in range(1, ncc):
+        if lo <= stats[c, cv2.CC_STAT_AREA] <= hi:
+            fly |= (lbl == c)
+    if not fly.any():
+        return bg.copy(), 0
+    return _iterative_fill(bg, fly), int(fly.sum())
+
+
+def model_background(stack, cfg, tracks=None, arena_mask=None, sample_idxs=None):
+    """Adaptive per-ROI background — cheap when the arena is clean, escalating to
+    ghost removal only where a fly dwelt long enough to bake in.
+
+    ``stack`` is an ``(N, sc, sc)`` uint8 array of uniform ROI samples (already
+    cropped + scaled the way tracking frames are). The tiers:
+
+    - **T0 (fast)** — a per-pixel high percentile (``bg_model_percentile``, default
+      p90). Clean whenever no fly dwells past that percentile; that's the common
+      case, so easy arenas pay only one ``np.percentile``.
+    - **T1 (de-ghost)** — if any arena pixel is baked in (near-max ``margin`` brighter
+      than the baseline), run the track-free neighbor-fill :func:`deghost`, which
+      recovers the true floor at a dwell spot from surrounding clean pixels.
+    - **T2 (fg-excluded)** — only if T1 leaves residual ghosts *and* a provisional
+      ``tracks`` frame is supplied: recompute the percentile with the tracked fly
+      masked out of each sample, then de-ghost again. Most sophisticated / most work.
+
+    - **T3 (stationary fill, opt-in, default OFF)** — a never-moved fly is dark in
+      ~every frame, so no temporal statistic recovers the floor at its pixel
+      (p50=p90=p98=max there). :func:`fill_stationary` tries to fix this spatially, by
+      diffusing surrounding floor into compact local dark spots. On 2025-12-11 it does
+      **not** help: the only compact local dark spot is the central rig port (which it
+      then fills → a false candidate every frame), while the truly-stuck wall fly has
+      no local contrast (it sits in the already-dim arena periphery) and is not
+      detected. So it is gated OFF by ``bg_model_fill_stationary``; the never-moved
+      case is instead caught by its tracking outcome (collapsed coverage / QC flags).
+      See background_modelling.html for the full negative result.
+
+    Returns ``(bg_uint8, info)`` where ``info`` records the tier used, method, initial
+    and final removable-ghost pixel counts, stationary-filled pixels, and build time.
+    """
+    import numpy as np
+    import time
+
+    sc = stack.shape[1]
+    arena = _arena_mask(sc) if arena_mask is None else arena_mask
+    margin = int(getattr(cfg, "bg_deghost_margin", 15))
+    p_lo = float(getattr(cfg, "bg_model_percentile", 90))
+    p_hi_pct = float(getattr(cfg, "bg_deghost_percentile", 98))
+    t0 = time.perf_counter()
+
+    p_hi = np.percentile(stack, p_hi_pct, axis=0)
+    bg = np.percentile(stack, p_lo, axis=0).astype(np.uint8)          # T0 baseline
+    ghost = _ghost_mask(bg, p_hi, arena, margin)
+    n_ghost0 = int(ghost.sum())
+    tier, method = 0, f"p{int(p_lo)}"
+
+    if n_ghost0 > 0:                                                   # T1
+        bg = deghost(bg, stack, p_hi_pct, margin, fill="neighbor")
+        tier, method = 1, f"p{int(p_lo)}+deghost"
+        ghost = _ghost_mask(bg, p_hi, arena, margin)
+        if (int(ghost.sum()) > 0 and tracks is not None and len(tracks)
+                and sample_idxs is not None):                             # T2
+            fge = _fg_excluded(stack, cfg, tracks, p_lo, sample_idxs)
+            bg = deghost(fge, stack, p_hi_pct, margin, fill="neighbor")
+            tier, method = 2, "fg_excluded+deghost"
+            ghost = _ghost_mask(bg, p_hi, arena, margin)
+
+    n_filled = 0
+    if getattr(cfg, "bg_model_fill_stationary", True):                # T3
+        bg, n_filled = fill_stationary(
+            bg, cfg, arena_mask=arena,
+            exclude_center_frac=float(getattr(cfg, "bg_model_fill_exclude_center", 0.0)))
+        if n_filled > 0:
+            tier = max(tier, 3)
+            method = method + "+fill" if "+" in method else f"p{int(p_lo)}+fill"
+
+    info = dict(tier=tier, method=method, n_ghost_initial=n_ghost0,
+                n_ghost_final=int(ghost.sum()), n_stationary_filled=n_filled,
+                build_s=round(time.perf_counter() - t0, 4))
+    return np.ascontiguousarray(bg), info
+
+
+def _fg_excluded(stack, cfg, tracks, percentile, sample_idxs):
+    """Per-pixel percentile with the tracked fly masked out of each sample (T2).
+
+    ``tracks`` is a DataFrame with ``frame``/``xs``/``ys`` in scaled-ROI pixels
+    (``xs``/``ys`` are reserved pandas method names, so index with brackets).
+    ``sample_idxs[k]`` is the source video frame of ``stack[k]``, so the right
+    track position is masked out of each sample. Pixels the fly always covers fall
+    back to the plain percentile."""
+    import numpy as np
+    sc = stack.shape[1]
+    scale = float(getattr(cfg, "roi_downscale", 1))
+    radius = int(max(6, getattr(cfg, "bg_protect_radius_px", 24) / scale))
+    tf = tracks.set_index("frame")
+    fstack = stack.astype(np.float32)
+    yy, xx = np.mgrid[0:sc, 0:sc]
+    for k, fidx in enumerate(sample_idxs):
+        if int(fidx) in tf.index:
+            r = tf.loc[int(fidx)]
+            m = (xx - float(r["xs"])) ** 2 + (yy - float(r["ys"])) ** 2 <= radius * radius
+            fstack[k][m] = np.nan
+    bg = np.nanpercentile(fstack, percentile, axis=0)
+    nan = np.isnan(bg)
+    if nan.any():
+        bg[nan] = np.percentile(stack, percentile, axis=0)[nan]
+    return bg.astype(np.uint8)
+
+
+def build_roi_backgrounds_uniform(video_path, rois, cfg, fly_masks=None, flags=None):
     """Per-ROI GMM backgrounds from uniformly-sampled ROI frames, decoded the SAME
     way the tracker frames are.
 
@@ -281,6 +453,10 @@ def build_roi_backgrounds_uniform(video_path, rois, cfg, fly_masks=None):
     where the model fit a distinct dark mode, i.e. the footprint the fly visited
     enough to perturb the background. Captured *before* de-ghost, so it shows what
     the raw GMM flagged as fly (a diagnostic for the caller to overlay).
+
+    If a dict is passed as ``flags`` and ``cfg.bg_model == "adaptive"``, it is
+    populated ``{roi_name: info}`` with the :func:`model_background` diagnostics per
+    ROI (tier used, ghost/stuck pixel counts, and the ``stationary_suspect`` flag).
     """
     import numpy as np
     import cv2
@@ -334,9 +510,15 @@ def build_roi_backgrounds_uniform(video_path, rois, cfg, fly_masks=None):
                 )
                 if fly_masks is not None:   # 2-component pixels (thr not NaN) = fly footprint
                     fly_masks[name] = np.ascontiguousarray(~np.isnan(thr))
-                if getattr(cfg, "bg_deghost", False):
-                    gmm = _deghost_background(gmm, frames, cfg)
-                out[name] = np.ascontiguousarray(gmm)
+                if getattr(cfg, "bg_model", "adaptive") == "adaptive":
+                    bg, binfo = model_background(frames, cfg)
+                    if flags is not None:
+                        flags[name] = binfo
+                    out[name] = np.ascontiguousarray(bg)
+                else:                        # legacy: brighter-component GMM + de-ghost
+                    if getattr(cfg, "bg_deghost", False):
+                        gmm = _deghost_background(gmm, frames, cfg)
+                    out[name] = np.ascontiguousarray(gmm)
             return out
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)

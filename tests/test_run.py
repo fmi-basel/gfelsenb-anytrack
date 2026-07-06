@@ -183,7 +183,7 @@ def test_save_frame_diff(tmp_path):
     assert diff[10, 10] < 10                            # untouched background ~ 0
 
 
-def _fake_roi_bgs(video_path, rois, cfg, fly_masks=None):
+def _fake_roi_bgs(video_path, rois, cfg, fly_masks=None, flags=None):
     """Stand-in for build_roi_backgrounds_uniform: flat backgrounds + a small mask."""
     out = {}
     for r in rois:
@@ -193,6 +193,8 @@ def _fake_roi_bgs(video_path, rois, cfg, fly_masks=None):
             m = np.zeros((sc, sc), bool)
             m[sc // 2 - 2:sc // 2 + 2, sc // 2 - 2:sc // 2 + 2] = True
             fly_masks[r.name] = m
+        if flags is not None:
+            flags[r.name] = dict(tier=0, method="p90", flag="ok")
     return out
 
 

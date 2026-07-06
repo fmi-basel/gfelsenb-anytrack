@@ -33,7 +33,7 @@ from ..models import CircleROI
 from ..background import (build_background_image, sample_frames_uniformly,
                           fit_gmm_background)
 from ..roi import detect_circular_rois
-from ..preprocess import roi_crop_geometry, deghost, _arena_mask  # deghost: canonical impl (also production)
+from ..preprocess import roi_crop_geometry, deghost, _arena_mask, model_background  # canonical impls (also production)
 from ..detector import (compute_diff, threshold_fg, build_morph_kernels,
                         _candidates_from_mask, extract_ellipses, centroid_contrast)
 from ..tracker import CentroidTracker
@@ -61,7 +61,7 @@ def crop_roi_gray(full_gray: np.ndarray, roi: CircleROI, downscale: int) -> np.n
     return np.ascontiguousarray(crop)
 
 
-BG_METHODS = ["gmm", "percentile", "fg_excluded"]
+BG_METHODS = ["adaptive", "gmm", "percentile", "fg_excluded"]
 
 
 def roi_uniform_samples(video_path, roi: CircleROI, cfg: AnyTrackConfig):
@@ -107,6 +107,10 @@ def build_roi_background(video_path, roi: CircleROI, cfg: AnyTrackConfig,
     except Exception:
         return None
     try:
+        if method == "adaptive":
+            tdf = tracks[["frame", "xs", "ys"]] if (tracks is not None and len(tracks)) else None
+            bg, _ = model_background(stack, cfg, tracks=tdf, sample_idxs=idxs)
+            return bg  # model_background does its own (neighbor) de-ghost internally
         if method == "fg_excluded":
             bg = _bg_fg_excluded(stack, idxs, cfg, tracks, percentile)
         else:
@@ -365,7 +369,7 @@ def _build_app(video_path: Path, cfg: AnyTrackConfig):
             self.work = dataclasses.replace(cfg)   # live-editable working config
             # Experiment knobs for the dwell-contamination A/B (background method +
             # candidate gating). Defaults reproduce the shipped pipeline.
-            self.opts = dict(bg_method="gmm", percentile=90, contrast_gate=0.0,
+            self.opts = dict(bg_method="adaptive", percentile=90, contrast_gate=0.0,
                              darkness_weight=0.0, deghost=False, deghost_margin=15,
                              deghost_fill="neighbor")
             self.cap = cv2.VideoCapture(str(video_path))

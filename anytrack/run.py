@@ -184,6 +184,7 @@ def _run_one(video_path, idx: int, n: int, *, args, cfg, single, group=None) -> 
     # path exactly (downscale-then-GMM avoids arena-rim edge artifacts).
     roi_bgs = None
     fly_masks = {} if (getattr(args, "save_roi_bg", False) or bg_only) else None
+    bg_flags = {}   # per-ROI model_background diagnostics (tier / method used)
     # In --bg-only the per-ROI backgrounds are the whole point, so build them even
     # if bg_reuse_for_roi is off in the config.
     if (getattr(cfg, "bg_reuse_for_roi", False) or bg_only) and video.rois:
@@ -191,7 +192,7 @@ def _run_one(video_path, idx: int, n: int, *, args, cfg, single, group=None) -> 
             bp.phase("roi", "modelling backgrounds…")
         from .preprocess import build_roi_backgrounds_uniform
         roi_bgs = build_roi_backgrounds_uniform(video.video_path, video.rois, cfg,
-                                                 fly_masks=fly_masks)
+                                                 fly_masks=fly_masks, flags=bg_flags)
 
     # --bg-only: save the backgrounds and stop before tracking.
     if bg_only:
@@ -203,6 +204,9 @@ def _run_one(video_path, idx: int, n: int, *, args, cfg, single, group=None) -> 
             import cv2
             cv2.imwrite(str(dst / f"{out.stem}_full_frame_bg.png"), bg_img)
         _save_frame_diff(video.video_path, dst, out.stem, batch=batch)
+        if bg_flags:            # per-ROI adaptive-model diagnostics (tier / flag)
+            import json
+            (dst / f"{out.stem}_bg_flags.json").write_text(json.dumps(bg_flags, indent=1))
         if bp is not None:
             bp.finish(f"{len(video.rois)} ROIs · backgrounds only")
         elif not batch:

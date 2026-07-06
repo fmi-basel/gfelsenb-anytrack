@@ -87,6 +87,12 @@ class AnyTrackConfig:
     bg_deghost_percentile: float = 98  # Per-pixel near-max used to recover the arena where a fly baked in (robust to a fly that leaves >~2% of frames)
     bg_deghost_margin: int = 15      # Only lift pixels this many gray levels darker than their near-max (≈ thr_fixed; ignores clean arena + true dark fixtures)
     bg_deghost_fill: str = "neighbor"  # How to fill a flagged dwell pixel: "neighbor" (Gaussian mixture of nearby floor pixels — unbiased, avoids the brighter-patch phantom) or "nearmax" (the per-pixel high percentile; overshoots)
+    bg_model: str = "adaptive"       # Per-ROI background method: "adaptive" (model_background: fast p90 → de-ghost on dwell → fg-excluded → stationary fill) or "gmm" (legacy brighter-component GMM + de-ghost)
+    bg_model_percentile: float = 90  # T0 baseline percentile for the adaptive model_background (clean whenever no fly dwells past it)
+    bg_model_fill_stationary: bool = False  # T3 (opt-in): spatially diffuse surrounding floor into compact baked-in dark blobs. Default OFF — on 2025-12-11 the only local dark spot is the central rig port, so this fills the port (→ false candidate every frame) while the truly-stuck wall fly has no local contrast (lost in the dim periphery) and is NOT recovered. See background_modelling.html.
+    bg_model_fill_min_area: int = 15    # Min connected area (scaled px) of a local dark spot to treat as a stuck fly to fill
+    bg_model_fill_max_area: int = 4000  # Max connected area (scaled px) — larger dark regions aren't a fly, left alone
+    bg_model_fill_exclude_center: float = 0.0  # Spare a central disk of this radius-fraction from stationary fill (>0 protects a central rig port); 0 = fill everywhere
     qc_edge_pinned_frac: float = 0.9   # QC: flag a ROI edge-pinned if the fly is in the outer arena (r>0.85R) this fraction of frames
     qc_low_activity_mm_s: float = 0.05 # QC: flag a ROI low-activity if mean speed is below this (mm/s)
     use_hw_decode: bool = True      # Try hardware-accelerated FFmpeg decode (probed; silent SW fallback if unsupported)

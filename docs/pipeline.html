@@ -123,6 +123,7 @@
     <span><a href="optimization_planning.html">Performance optimization planning →</a></span>
     <span><a href="streaming_bg_parity.html">Streaming background parity fix →</a></span>
     <span><a href="background_methods.html">ROI background methods →</a></span>
+    <span><a href="background_modelling.html">Background modelling →</a></span>
   </div>
   <div class="meter" id="meter" aria-label="Milestone A progress"></div>
 
@@ -186,8 +187,8 @@ const PIPELINE = [
    desc:"Decode frames + per-frame timing CSV (cv2.VideoCapture)."},
   {name:"ROI / arena definition", mod:"roi.py", status:"done",
    desc:"Circular arenas via Hough; ROI mask + crop; full-frame ↔ ROI-local origin."},
-  {name:"Per-ROI background model", mod:"background.py", status:"partial",
-   desc:"Static per-pixel GMM implemented (vectorized numpy EM, ~12× faster than the sklearn loop). A4 done: BackgroundState adds opt-in illumination-drift correction — per frame it estimates a global brightness offset from safe pixels (inside the arena, outside a protected disk around the tracked object + previous foreground) and returns a drift-corrected plate for subtraction, plus an optional slow asymmetric per-pixel update. OFF by default (cfg.bg_drift_correction); wired into both trackers."},
+  {name:"Per-ROI background model", mod:"preprocess.py / background.py", status:"done",
+   desc:"Adaptive model_background (cfg.bg_model='adaptive', default) is the per-ROI (local) background that drives tracking: T0 fast per-pixel percentile when the arena is clean → T1 track-free neighbor-fill de-ghost where a fly dwelt (recovers the true floor from nearby clean pixels) → T2 fg-excluded only if a residual ghost remains and a track exists. Benchmarked ghost-free (0 removable ghosts) across all 32 arenas of 2025-12-11 at percentile speed (~26× faster than fg-excluded, 0% multi-candidate vs GMM ~55%); see background_modelling.html. The one impossible case — a fly that never moved — is un-recoverable by background modelling (temporally the floor is never seen at its pixel; spatially it has no local contrast to fill, while the only fillable spot is the central port → false candidates). An opt-in T3 spatial fill (fill_stationary, bg_model_fill_stationary, default OFF) confirms this. Never-moved flies are caught by their tracking outcome instead (collapsed coverage / QC edge_pinned & low_activity). --bg-only writes per-ROI tier to bg_flags.json. Legacy GMM still available (bg_model='gmm'; vectorized numpy EM, ~12× vs sklearn). A4 BackgroundState adds opt-in illumination-drift correction (OFF, cfg.bg_drift_correction)."},
   {name:"Foreground detection (ellipse fit)", mod:"detector.py", status:"done",
    desc:"Directional bg-subtraction → threshold → morphology → contours → fitEllipse. Shared by both trackers. Surfaces up to cfg.detect_max_candidates (default 5) blobs per frame, not just the largest, so the tracker can disambiguate the fly from static artifacts by proximity (fixed arena_01 mistracking f550-650, where the old max_centroids_per_roi=1 cap kept flickering between the fly and a comparable-size static artifact; arena_01 → 100%)."},
   {name:"Centroid tracking (Kalman + greedy)", mod:"tracker.py", status:"done",

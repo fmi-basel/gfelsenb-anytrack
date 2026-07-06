@@ -90,10 +90,13 @@ def test_debug_bg_methods_and_gating(tmp_path):
         pytest.skip("no MJPG encoder in this OpenCV build")
     cfg = _cfg()
     roi = CircleROI(name="arena_01", cx=120, cy=120, r=100)
-    assert set(D.BG_METHODS) == {"gmm", "percentile", "fg_excluded"}
+    assert set(D.BG_METHODS) == {"adaptive", "gmm", "percentile", "fg_excluded"}
 
     perc = D.build_roi_background(vid, roi, cfg, method="percentile", percentile=90)
     assert perc is not None and perc.dtype == np.uint8 and np.median(perc) > 150
+
+    adap = D.build_roi_background(vid, roi, cfg, method="adaptive")
+    assert adap is not None and adap.dtype == np.uint8 and np.median(adap) > 150
 
     tracks = D.track_roi(vid, roi, perc, cfg)
     fge = D.build_roi_background(vid, roi, cfg, method="fg_excluded", percentile=90, tracks=tracks)
