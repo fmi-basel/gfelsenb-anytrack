@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 from anytrack.config import AnyTrackConfig
 from anytrack.models import CircleROI
+from anytrack.preprocess import roi_crop_geometry
 import anytrack.run as run_mod
 
 
@@ -139,6 +140,69 @@ def test_anytrack_run_writes_custom_output(tmp_path, monkeypatch):
     for col in ("roi", "frame", "x", "y", "x_roi", "y_roi"):
         assert col in df.columns
     assert df["x"].max() - df["x"].min() > 5  # captured the rightward motion
+
+
+def test_save_roi_backgrounds_writes_bg_and_flymask(tmp_path):
+    """_save_roi_backgrounds writes <arena>.png and a red-tinted <arena>_flymask.png."""
+    out = tmp_path / "clip_tracks.parquet"
+    bg = np.full((40, 40), 200, np.uint8)
+    mask = np.zeros((40, 40), bool)
+    mask[15:25, 15:25] = True
+    bg_dir = run_mod._save_roi_backgrounds(out, {"arena_01": bg}, {"arena_01": mask}, batch=False)
+
+    assert bg_dir == out.parent / "clip_tracks_roi_bg"
+    assert (bg_dir / "arena_01.png").exists()
+    fm = bg_dir / "arena_01_flymask.png"
+    assert fm.exists()
+    ov = cv2.imread(str(fm))                     # BGR
+    b, g, r = (int(c) for c in ov[20, 20])       # masked pixel -> red-tinted
+    assert r > g and r > b
+    b0, g0, r0 = (int(c) for c in ov[2, 2])      # unmasked pixel -> stays gray
+    assert abs(r0 - g0) <= 2 and abs(g0 - b0) <= 2
+
+
+def test_save_roi_backgrounds_none(tmp_path):
+    """No backgrounds built -> nothing written, returns None."""
+    out = tmp_path / "clip_tracks.parquet"
+    assert run_mod._save_roi_backgrounds(out, None, None, batch=True) is None
+    assert not (out.parent / "clip_tracks_roi_bg").exists()
+
+
+def _fake_roi_bgs(video_path, rois, cfg, fly_masks=None):
+    """Stand-in for build_roi_backgrounds_uniform: flat backgrounds + a small mask."""
+    out = {}
+    for r in rois:
+        _, _, _, sc = roi_crop_geometry(r, cfg.roi_downscale)
+        out[r.name] = np.full((sc, sc), 200, np.uint8)
+        if fly_masks is not None:
+            m = np.zeros((sc, sc), bool)
+            m[sc // 2 - 2:sc // 2 + 2, sc // 2 - 2:sc // 2 + 2] = True
+            fly_masks[r.name] = m
+    return out
+
+
+def test_anytrack_run_bg_only(tmp_path, monkeypatch):
+    """--bg-only saves the backgrounds (+ fly-mask + full-frame) and writes no tracks."""
+    video = tmp_path / "vid.avi"
+    if not _write_video(video):
+        pytest.skip("No MJPG encoder available")
+    _write_timing(video.with_suffix(".csv"), n=20)
+
+    monkeypatch.setattr(run_mod, "load_config", _synthetic_cfg)
+    monkeypatch.setattr(run_mod, "ensure_rois", _fake_ensure)
+    monkeypatch.setattr(run_mod, "build_background_image",
+                        lambda *a, **k: np.full((80, 80), 200, np.uint8))
+    import anytrack.preprocess as pp
+    monkeypatch.setattr(pp, "build_roi_backgrounds_uniform", _fake_roi_bgs)
+
+    out = tmp_path / "o.parquet"
+    rc = run_mod.main(["--video", str(video), "--output", str(out), "--no-fast", "--bg-only"])
+    assert rc == 0
+    bg_dir = out.parent / "o_roi_bg"
+    assert (bg_dir / "r0.png").exists()
+    assert (bg_dir / "r0_flymask.png").exists()
+    assert (bg_dir / "o_full_frame_bg.png").exists()
+    assert not out.exists()  # bg-only stops before tracking
 
 
 def test_anytrack_run_csv_output_and_missing_timing(tmp_path, monkeypatch):

@@ -45,6 +45,44 @@ def _resolve_output_path(output, cfg, video):
     return out / f"{stem}_tracks.parquet"
 
 
+def _save_roi_backgrounds(out, roi_bgs, fly_masks, *, batch) -> Optional["Path"]:
+    """Write the per-ROI tracking backgrounds (+ GMM fly-mask overlays) to
+    ``<out.stem>_roi_bg/`` and return that dir (None when nothing was built).
+
+    One ``<arena>.png`` per ROI (the uniform per-ROI GMM + de-ghost that drives
+    tracking, at tracking resolution), plus ``<arena>_flymask.png`` — the same
+    background with the GMM two-component (fly) pixels tinted red. ``roi_bgs`` is
+    None when bg_reuse_for_roi is off or FFmpeg sampling fell back to the
+    per-worker GMM (there is no single canonical per-ROI background then).
+    """
+    import cv2
+    import numpy as np
+    if not roi_bgs:
+        if not batch:
+            info("per-ROI backgrounds not built (bg_reuse_for_roi off or sampling "
+                 "failed → per-worker GMM); nothing to save.")
+        return None
+    bg_dir = out.parent / f"{out.stem}_roi_bg"
+    bg_dir.mkdir(parents=True, exist_ok=True)
+    n_mask = 0
+    for name, img in roi_bgs.items():
+        cv2.imwrite(str(bg_dir / f"{name}.png"), img)
+        # Companion overlay: the GMM 2-component ("fly") mask in red on the
+        # background, so the fly footprint the model had to handle is visible.
+        m = (fly_masks or {}).get(name)
+        if m is not None and m.shape == img.shape and m.any():
+            ov = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+            mb = m.astype(bool)
+            ov[mb] = (0.5 * ov[mb].astype(np.float32)
+                      + 0.5 * np.array([0, 0, 255], np.float32)).astype(np.uint8)
+            cv2.imwrite(str(bg_dir / f"{name}_flymask.png"), ov)
+            n_mask += 1
+    if not batch:
+        extra = f" (+{n_mask} fly-mask overlay(s))" if n_mask else ""
+        ok(f"saved {len(roi_bgs)} per-ROI background(s){extra} → {bg_dir}")
+    return bg_dir
+
+
 def _run_one(video_path, idx: int, n: int, *, args, cfg, single, group=None) -> Optional[int]:
     """Run the full pipeline on one video; return its tracked row count (or None).
 
@@ -83,9 +121,11 @@ def _run_one(video_path, idx: int, n: int, *, args, cfg, single, group=None) -> 
     else:
         bp.phase("roi", "detecting ROIs…")
 
-    # Build the model background once; reuse it for ROI detection and QC.
+    bg_only = getattr(args, "bg_only", False)
+    # Build the model background once; reuse it for ROI detection and QC (and always
+    # in --bg-only, where the backgrounds are the deliverable).
     bg_img = (build_background_image(video.video_path, cfg, progress_hook=progress)
-              if (not video.rois or args.qc) else None)
+              if (not video.rois or args.qc or bg_only) else None)
     ensure_rois(video, cfg, background=bg_img)
     if not video.rois:
         if bp is not None:
@@ -102,11 +142,31 @@ def _run_one(video_path, idx: int, n: int, *, args, cfg, single, group=None) -> 
     # cropping+downscaling per ROI *before* fitting the GMM, matching the file
     # path exactly (downscale-then-GMM avoids arena-rim edge artifacts).
     roi_bgs = None
-    fly_masks = {} if getattr(args, "save_roi_bg", False) else None
-    if getattr(cfg, "bg_reuse_for_roi", False) and video.rois:
+    fly_masks = {} if (getattr(args, "save_roi_bg", False) or bg_only) else None
+    # In --bg-only the per-ROI backgrounds are the whole point, so build them even
+    # if bg_reuse_for_roi is off in the config.
+    if (getattr(cfg, "bg_reuse_for_roi", False) or bg_only) and video.rois:
+        if bp is not None:
+            bp.phase("roi", "modelling backgrounds…")
         from .preprocess import build_roi_backgrounds_uniform
         roi_bgs = build_roi_backgrounds_uniform(video.video_path, video.rois, cfg,
                                                  fly_masks=fly_masks)
+
+    # --bg-only: save the backgrounds and stop before tracking.
+    if bg_only:
+        out = _resolve_output_path(args.output, cfg, video)
+        bg_dir = _save_roi_backgrounds(out, roi_bgs, fly_masks, batch=batch)
+        if bg_img is not None:  # also drop the full-frame model background used for ROI detection
+            import cv2
+            dst = (bg_dir or out.parent)
+            dst.mkdir(parents=True, exist_ok=True)
+            cv2.imwrite(str(dst / f"{out.stem}_full_frame_bg.png"), bg_img)
+        if bp is not None:
+            bp.finish(f"{len(video.rois)} ROIs · backgrounds only")
+        elif not batch:
+            ok(f"background-only run · {len(video.rois)} ROI(s)"
+               + (f" → {bg_dir}" if bg_dir else " (no per-ROI backgrounds saved)"))
+        return len(video.rois)
 
     t0 = time.perf_counter()
     session = TrackingSession(cfg=cfg, video=video)
@@ -121,34 +181,9 @@ def _run_one(video_path, idx: int, n: int, *, args, cfg, single, group=None) -> 
 
     # Optionally dump the per-ROI backgrounds that actually drove tracking (the
     # uniformly-sampled per-ROI GMM + de-ghost from build_roi_backgrounds_uniform),
-    # not the full-frame model background QC saves. One PNG per arena, at tracking
-    # resolution (roi_downscale). None when bg_reuse_for_roi is off or sampling fell
-    # back to the per-worker GMM.
+    # not the full-frame model background QC saves.
     if getattr(args, "save_roi_bg", False):
-        import cv2
-        import numpy as np
-        if roi_bgs:
-            bg_dir = out.parent / f"{out.stem}_roi_bg"
-            bg_dir.mkdir(parents=True, exist_ok=True)
-            n_mask = 0
-            for name, img in roi_bgs.items():
-                cv2.imwrite(str(bg_dir / f"{name}.png"), img)
-                # Companion overlay: the GMM 2-component ("fly") mask in red on the
-                # background, so the fly footprint the model had to handle is visible.
-                m = (fly_masks or {}).get(name)
-                if m is not None and m.shape == img.shape and m.any():
-                    ov = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-                    mb = m.astype(bool)
-                    ov[mb] = (0.5 * ov[mb].astype(np.float32)
-                              + 0.5 * np.array([0, 0, 255], np.float32)).astype(np.uint8)
-                    cv2.imwrite(str(bg_dir / f"{name}_flymask.png"), ov)
-                    n_mask += 1
-            if not batch:
-                extra = f" (+{n_mask} fly-mask overlay(s))" if n_mask else ""
-                ok(f"saved {len(roi_bgs)} per-ROI background(s){extra} → {bg_dir}")
-        elif not batch:
-            info("per-ROI backgrounds not built (bg_reuse_for_roi off or sampling "
-                 "failed → per-worker GMM); nothing to save.")
+        _save_roi_backgrounds(out, roi_bgs, fly_masks, batch=batch)
 
     pose_note = ""
     if not batch:
@@ -252,6 +287,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                          "<output_stem>_roi_bg/, plus a <arena>_flymask.png overlay "
                          "marking the GMM 2-component (fly) pixels in red. Distinct "
                          "from the full-frame qc_background.png written by --qc.")
+    ap.add_argument("--bg-only", "--bg_only", dest="bg_only", action="store_true",
+                    help="Only run background modelling: build the model + per-ROI "
+                         "backgrounds, save them (implies --save-roi-bg, plus the "
+                         "full-frame background), and stop before tracking. No tracks "
+                         "are written; --qc/--crops/--pose are ignored.")
     ap.add_argument("--pose", action="store_true",
                     help="Also run the pose stage (keypoints) after tracking (B5).")
     ap.add_argument("--pose-model", type=Path, default=None,
