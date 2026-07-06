@@ -168,6 +168,21 @@ def test_save_roi_backgrounds_none(tmp_path):
     assert not (out.parent / "clip_tracks_roi_bg").exists()
 
 
+def test_save_frame_diff(tmp_path):
+    """_save_frame_diff writes |last − first| as a PNG: bright where the blob started
+    and ended, near-black in between and in the static background."""
+    video = tmp_path / "vid.avi"
+    if not _write_video(video, n=20):           # dark blob moves 20px -> 58px at y=40
+        pytest.skip("No MJPG encoder available")
+
+    path = run_mod._save_frame_diff(video, tmp_path, "clip", batch=False)
+    assert path == tmp_path / "clip_framediff.png"
+    diff = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+    assert diff is not None and diff.shape == (80, 80)
+    assert diff[40, 20] > 100 and diff[40, 58] > 100   # blob start & end positions moved
+    assert diff[10, 10] < 10                            # untouched background ~ 0
+
+
 def _fake_roi_bgs(video_path, rois, cfg, fly_masks=None):
     """Stand-in for build_roi_backgrounds_uniform: flat backgrounds + a small mask."""
     out = {}
@@ -202,6 +217,7 @@ def test_anytrack_run_bg_only(tmp_path, monkeypatch):
     assert (bg_dir / "r0.png").exists()
     assert (bg_dir / "r0_flymask.png").exists()
     assert (bg_dir / "o_full_frame_bg.png").exists()
+    assert (bg_dir / "o_framediff.png").exists()  # bg-only includes the frame diff
     assert not out.exists()  # bg-only stops before tracking
 
 

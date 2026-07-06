@@ -83,6 +83,47 @@ def _save_roi_backgrounds(out, roi_bgs, fly_masks, *, batch) -> Optional["Path"]
     return bg_dir
 
 
+def _save_frame_diff(video_path, dst_dir, stem, *, batch) -> Optional["Path"]:
+    """Save |last − first| frame as a grayscale PNG (``<stem>_framediff.png``).
+
+    A whole-video motion map: bright where something moved between the first and
+    last frame, near-black where nothing did (e.g. an inactive / wall-pinned fly).
+    Returns the written path, or None if the video couldn't be read.
+    """
+    import cv2
+    cap = cv2.VideoCapture(str(video_path))
+    try:
+        ok_first, first = cap.read()
+        if not ok_first:
+            return None
+        n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        last = None
+        if n > 1:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, n - 1)
+            ok_last, frame = cap.read()
+            if ok_last:
+                last = frame
+        if last is None:                     # seek unsupported → scan to the last readable frame
+            last = first
+            while True:
+                ok_scan, frame = cap.read()
+                if not ok_scan:
+                    break
+                last = frame
+    finally:
+        cap.release()
+    g0 = cv2.cvtColor(first, cv2.COLOR_BGR2GRAY)
+    g1 = cv2.cvtColor(last, cv2.COLOR_BGR2GRAY)
+    diff = cv2.absdiff(g1, g0)
+    dst_dir = Path(dst_dir)
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    path = dst_dir / f"{stem}_framediff.png"
+    cv2.imwrite(str(path), diff)
+    if not batch:
+        ok(f"saved first↔last frame diff → {path}")
+    return path
+
+
 def _run_one(video_path, idx: int, n: int, *, args, cfg, single, group=None) -> Optional[int]:
     """Run the full pipeline on one video; return its tracked row count (or None).
 
@@ -156,11 +197,12 @@ def _run_one(video_path, idx: int, n: int, *, args, cfg, single, group=None) -> 
     if bg_only:
         out = _resolve_output_path(args.output, cfg, video)
         bg_dir = _save_roi_backgrounds(out, roi_bgs, fly_masks, batch=batch)
+        dst = (bg_dir or out.parent)
+        dst.mkdir(parents=True, exist_ok=True)
         if bg_img is not None:  # also drop the full-frame model background used for ROI detection
             import cv2
-            dst = (bg_dir or out.parent)
-            dst.mkdir(parents=True, exist_ok=True)
             cv2.imwrite(str(dst / f"{out.stem}_full_frame_bg.png"), bg_img)
+        _save_frame_diff(video.video_path, dst, out.stem, batch=batch)
         if bp is not None:
             bp.finish(f"{len(video.rois)} ROIs · backgrounds only")
         elif not batch:
@@ -182,8 +224,11 @@ def _run_one(video_path, idx: int, n: int, *, args, cfg, single, group=None) -> 
     # Optionally dump the per-ROI backgrounds that actually drove tracking (the
     # uniformly-sampled per-ROI GMM + de-ghost from build_roi_backgrounds_uniform),
     # not the full-frame model background QC saves.
+    bg_dir = None
     if getattr(args, "save_roi_bg", False):
-        _save_roi_backgrounds(out, roi_bgs, fly_masks, batch=batch)
+        bg_dir = _save_roi_backgrounds(out, roi_bgs, fly_masks, batch=batch)
+    if getattr(args, "save_frame_diff", False):
+        _save_frame_diff(video.video_path, bg_dir or out.parent, out.stem, batch=batch)
 
     pose_note = ""
     if not batch:
@@ -287,11 +332,18 @@ def main(argv: Optional[List[str]] = None) -> int:
                          "<output_stem>_roi_bg/, plus a <arena>_flymask.png overlay "
                          "marking the GMM 2-component (fly) pixels in red. Distinct "
                          "from the full-frame qc_background.png written by --qc.")
+    ap.add_argument("--save-frame-diff", "--save_frame_diff", dest="save_frame_diff",
+                    action="store_true",
+                    help="Save |last − first| frame as <output_stem>_framediff.png "
+                         "(a whole-video motion map; near-black means nothing moved). "
+                         "Written into the _roi_bg/ dir when --save-roi-bg is also set, "
+                         "else next to the output. Included automatically by --bg-only.")
     ap.add_argument("--bg-only", "--bg_only", dest="bg_only", action="store_true",
                     help="Only run background modelling: build the model + per-ROI "
                          "backgrounds, save them (implies --save-roi-bg, plus the "
-                         "full-frame background), and stop before tracking. No tracks "
-                         "are written; --qc/--crops/--pose are ignored.")
+                         "full-frame background and the first↔last frame diff), and "
+                         "stop before tracking. No tracks are written; "
+                         "--qc/--crops/--pose are ignored.")
     ap.add_argument("--pose", action="store_true",
                     help="Also run the pose stage (keypoints) after tracking (B5).")
     ap.add_argument("--pose-model", type=Path, default=None,
