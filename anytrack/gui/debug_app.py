@@ -219,18 +219,27 @@ def render_stage(stage: str, roi_gray: np.ndarray, bg: np.ndarray, cfg: AnyTrack
         return vis
     # final: raw + tracked centroid + trail + jump marker
     vis = _to_bgr(roi_gray)
-    if tracks is not None and len(tracks):
-        past = tracks[(tracks.frame <= frame_idx) & (tracks.frame > frame_idx - trail)]
-        pts = past[["xs", "ys"]].to_numpy().astype(np.int32)
-        for j in range(1, len(pts)):
-            cv2.line(vis, tuple(pts[j - 1]), tuple(pts[j]), (255, 180, 0), 1, cv2.LINE_AA)
-        cur = tracks[tracks.frame == frame_idx]
-        if len(cur):
-            r = cur.iloc[0]
-            c = (int(r["xs"]), int(r["ys"]))   # "xs" is a reserved DataFrame/Series method — use []
-            jumped = r["jump_px"] > cfg.max_jump_px
-            cv2.circle(vis, c, 6, (0, 0, 255) if jumped else (0, 255, 0), 2, cv2.LINE_AA)
-            cv2.drawMarker(vis, c, (255, 255, 255), cv2.MARKER_CROSS, 10, 1)
+    rad = max(7, roi_gray.shape[0] // 45)   # marker size scales with ROI size
+    if tracks is None or not len(tracks):
+        cv2.putText(vis, "no track (still computing?)", (6, 18),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 165, 255), 1, cv2.LINE_AA)
+        return vis
+    past = tracks[(tracks["frame"] <= frame_idx) & (tracks["frame"] > frame_idx - trail)]
+    pts = past[["xs", "ys"]].to_numpy().astype(np.int32)
+    for j in range(1, len(pts)):
+        cv2.line(vis, tuple(pts[j - 1]), tuple(pts[j]), (255, 180, 0), 2, cv2.LINE_AA)
+    cur = tracks[tracks["frame"] == frame_idx]
+    if len(cur):                                   # detected on this frame
+        r = cur.iloc[0]
+        c = (int(r["xs"]), int(r["ys"]))           # "xs" is a reserved pandas method — index with []
+        jumped = bool(r["jump_px"] > cfg.max_jump_px)
+        cv2.circle(vis, c, rad, (0, 0, 255) if jumped else (0, 255, 0), 2, cv2.LINE_AA)
+        cv2.drawMarker(vis, c, (255, 255, 255), cv2.MARKER_CROSS, rad + 4, 1)
+    elif len(past):                                # missed here → dim last-known position
+        c = tuple(int(v) for v in past[["xs", "ys"]].to_numpy()[-1])
+        cv2.circle(vis, c, rad, (0, 200, 255), 1, cv2.LINE_AA)
+        cv2.putText(vis, "no detection this frame", (6, 18),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 165, 255), 1, cv2.LINE_AA)
     return vis
 
 
