@@ -116,6 +116,25 @@ def _run_one(video_path, idx: int, n: int, *, args, cfg, single, group=None) -> 
     out = _resolve_output_path(args.output, cfg, video)
     fmt = "csv" if out.suffix.lower() == ".csv" else None
     write_tracks(df, out, fmt=fmt)
+
+    # Optionally dump the per-ROI backgrounds that actually drove tracking (the
+    # uniformly-sampled per-ROI GMM + de-ghost from build_roi_backgrounds_uniform),
+    # not the full-frame model background QC saves. One PNG per arena, at tracking
+    # resolution (roi_downscale). None when bg_reuse_for_roi is off or sampling fell
+    # back to the per-worker GMM.
+    if getattr(args, "save_roi_bg", False):
+        import cv2
+        if roi_bgs:
+            bg_dir = out.parent / f"{out.stem}_roi_bg"
+            bg_dir.mkdir(parents=True, exist_ok=True)
+            for name, img in roi_bgs.items():
+                cv2.imwrite(str(bg_dir / f"{name}.png"), img)
+            if not batch:
+                ok(f"saved {len(roi_bgs)} per-ROI background(s) → {bg_dir}")
+        elif not batch:
+            info("per-ROI backgrounds not built (bg_reuse_for_roi off or sampling "
+                 "failed → per-worker GMM); nothing to save.")
+
     pose_note = ""
     if not batch:
         rows_s = (len(df) / dt) if dt > 0 else 0.0
@@ -212,6 +231,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help="Output px (square) for a cropped QC overlay (default from config: 800).")
     ap.add_argument("--crops", action="store_true",
                     help="Also export centroid-centered crops (A5).")
+    ap.add_argument("--save-roi-bg", "--save_roi_bg", dest="save_roi_bg", action="store_true",
+                    help="Save the per-ROI backgrounds that drive tracking (uniform "
+                         "per-ROI GMM + de-ghost) as one PNG per arena in "
+                         "<output_stem>_roi_bg/. Distinct from the full-frame "
+                         "qc_background.png written by --qc.")
     ap.add_argument("--pose", action="store_true",
                     help="Also run the pose stage (keypoints) after tracking (B5).")
     ap.add_argument("--pose-model", type=Path, default=None,
