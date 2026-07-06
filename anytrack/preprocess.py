@@ -179,6 +179,39 @@ def roi_crop_geometry(roi: CircleROI, downscale: int) -> Tuple[int, int, int, in
     return crop_size, x0, y0, scaled_size
 
 
+def _arena_mask(sc: int):
+    """Boolean disk mask over the arena (excludes the black corners / vignette)."""
+    import numpy as np
+    yy, xx = np.mgrid[0:sc, 0:sc]
+    return (xx - sc / 2) ** 2 + (yy - sc / 2) ** 2 <= (0.92 * sc / 2) ** 2
+
+
+def deghost(bg, stack, percentile: float = 98, margin: int = 15):
+    """Lift a baked-in dark blob (a fly the background modelling failed to exclude
+    at a very-long-dwell spot) to the true arena brightness — fixture-safe.
+
+    Within the arena disk, any pixel where the per-pixel high percentile of the
+    sample ``stack`` (a robust near-max) is more than ``margin`` gray levels
+    brighter than ``bg`` is replaced with that percentile. A dwelling fly's pixel
+    is bright whenever the fly briefly leaves, so it is recovered; a genuinely
+    static dark fixture (e.g. a central port) is dark at the near-max too and is
+    left untouched, as are clean pixels. Returns a uint8 background.
+    """
+    import numpy as np
+    sc = bg.shape[0]
+    p_hi = np.percentile(stack, percentile, axis=0)
+    lift = (p_hi.astype(np.int16) - bg.astype(np.int16) > margin) & _arena_mask(sc)
+    out = bg.copy()
+    out[lift] = p_hi[lift].astype(np.uint8)
+    return out
+
+
+def _deghost_background(bg, frames, cfg):
+    """Config-driven :func:`deghost` for the production per-ROI background."""
+    return deghost(bg, frames, getattr(cfg, "bg_deghost_percentile", 98),
+                   getattr(cfg, "bg_deghost_margin", 15))
+
+
 def build_roi_backgrounds_uniform(video_path, rois, cfg):
     """Per-ROI GMM backgrounds from uniformly-sampled ROI frames, decoded the SAME
     way the tracker frames are.
@@ -245,6 +278,8 @@ def build_roi_backgrounds_uniform(video_path, rois, cfg):
                     frames, bic_improvement=cfg.gmm_bic_improvement, lowp=cfg.gmm_lowp,
                     min_std=cfg.gmm_min_std, reg_covar=cfg.gmm_reg_covar,
                 )
+                if getattr(cfg, "bg_deghost", False):
+                    gmm = _deghost_background(gmm, frames, cfg)
                 out[name] = np.ascontiguousarray(gmm)
             return out
         finally:

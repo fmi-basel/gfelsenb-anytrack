@@ -83,6 +83,9 @@ class AnyTrackConfig:
     cv_threads_per_worker: int = 1  # OpenCV threads inside each tracking worker (0 = leave default)
     roi_stream_decode: bool = True  # Decode once and pipe raw gray crops to trackers (FIFO); else encode ROI mp4s
     bg_reuse_for_roi: bool = True  # Reuse the (unblurred) full-frame uniform bg per ROI instead of per-worker/first-N GMM (fixes streaming first-100-frame bake-in)
+    bg_deghost: bool = True          # Lift a baked-in fly (very-long-dwell blind spot) to arena brightness via a fixture-safe near-max pass
+    bg_deghost_percentile: float = 98  # Per-pixel near-max used to recover the arena where a fly baked in (robust to a fly that leaves >~2% of frames)
+    bg_deghost_margin: int = 15      # Only lift pixels this many gray levels darker than their near-max (≈ thr_fixed; ignores clean arena + true dark fixtures)
     use_hw_decode: bool = True      # Try hardware-accelerated FFmpeg decode (probed; silent SW fallback if unsupported)
     hw_decode_backend: str = "auto" # auto|videotoolbox|none
     batch_concurrency: int = 0      # Videos processed at once in batch mode (0 = auto from cores, 1 = sequential)

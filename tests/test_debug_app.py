@@ -105,6 +105,38 @@ def test_debug_bg_methods_and_gating(tmp_path):
     assert np.corrcoef(gated["frame"].to_numpy(), gated["xs"].to_numpy())[0, 1] > 0.8
 
 
+def test_deghost_lifts_fly_keeps_fixture():
+    """de-ghost lifts a baked-in fly (dark in bg but bright somewhere in the stack)
+    to arena brightness, while keeping a genuinely static dark fixture and clean
+    pixels unchanged — no video/ffmpeg needed."""
+    sc, n = 100, 100
+    stack = np.full((n, sc, sc), 200, np.uint8)
+    for k in range(n):                       # dwell fly at (30,30): present 95% of frames
+        if k % 20 != 0:
+            stack[k, 25:35, 25:35] = 20
+    stack[:, 65:75, 65:75] = 25              # static fixture at (70,70): every frame
+
+    bg = D._bg_from_stack(stack, AnyTrackConfig(), "percentile", 90)  # p90 bakes the fly in
+    assert bg[30, 30] < 60 and bg[70, 70] < 60
+
+    dg = D.deghost(bg, stack, percentile=98, margin=15)
+    assert dg[30, 30] > 150     # fly lifted to arena (arena visible in the 5% clean frames)
+    assert dg[70, 70] < 60      # static fixture preserved
+    assert abs(int(dg[50, 50]) - int(bg[50, 50])) <= 2   # clean arena untouched
+
+
+def test_build_roi_background_deghost_flag(tmp_path):
+    """apply_deghost is plumbed through build_roi_background end-to-end."""
+    vid = tmp_path / "syn.avi"
+    if not _synthetic_video(vid):
+        pytest.skip("no MJPG encoder in this OpenCV build")
+    cfg = _cfg()
+    roi = CircleROI(name="arena_01", cx=120, cy=120, r=100)
+    bg = D.build_roi_background(vid, roi, cfg, method="percentile", apply_deghost=True,
+                                deghost_margin=15)
+    assert bg is not None and bg.dtype == np.uint8 and np.median(bg) > 150
+
+
 def test_debug_background_fallback(tmp_path):
     """build_roi_background returns None on an unreadable video (worker copes)."""
     cfg = _cfg()

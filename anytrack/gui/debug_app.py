@@ -33,7 +33,7 @@ from ..models import CircleROI
 from ..background import (build_background_image, sample_frames_uniformly,
                           fit_gmm_background)
 from ..roi import detect_circular_rois
-from ..preprocess import roi_crop_geometry
+from ..preprocess import roi_crop_geometry, deghost, _arena_mask  # deghost: canonical impl (also production)
 from ..detector import (compute_diff, threshold_fg, build_morph_kernels,
                         _candidates_from_mask, extract_ellipses, centroid_contrast)
 from ..tracker import CentroidTracker
@@ -86,8 +86,9 @@ def _bg_from_stack(stack: np.ndarray, cfg: AnyTrackConfig, method: str, percenti
 
 
 def build_roi_background(video_path, roi: CircleROI, cfg: AnyTrackConfig,
-                         method: str = "gmm", percentile: float = 90,
-                         tracks=None) -> Optional[np.ndarray]:
+                         method: str = "gmm", percentile: float = 90, tracks=None,
+                         apply_deghost: bool = False, deghost_percentile: float = 98,
+                         deghost_margin: int = 15) -> Optional[np.ndarray]:
     """Per-ROI background from uniform cv2 samples (self-consistent with the
     cv2-decoded frames this GUI displays). Returns scaled-local uint8 or None.
 
@@ -95,15 +96,23 @@ def build_roi_background(video_path, roi: CircleROI, cfg: AnyTrackConfig,
     (per-pixel high percentile — robust to dwell, can't overshoot brighter than
     an observed arena pixel) · ``fg_excluded`` (per-pixel percentile computed
     only from frames where the tracked fly is far from that pixel — removes
-    dwell ghosts; needs ``tracks``, else falls back to plain percentile)."""
+    dwell ghosts; needs ``tracks``, else falls back to plain percentile).
+
+    ``apply_deghost`` runs the fixture-safe :func:`deghost` post-pass to lift any
+    residual baked-in fly blob to the arena brightness (for very-long-dwell flies
+    the other methods can't exclude)."""
     try:
         stack, idxs = roi_uniform_samples(video_path, roi, cfg)
     except Exception:
         return None
     try:
         if method == "fg_excluded":
-            return _bg_fg_excluded(stack, idxs, cfg, tracks, percentile)
-        return _bg_from_stack(stack, cfg, method, percentile)
+            bg = _bg_fg_excluded(stack, idxs, cfg, tracks, percentile)
+        else:
+            bg = _bg_from_stack(stack, cfg, method, percentile)
+        if bg is not None and apply_deghost:
+            bg = deghost(bg, stack, deghost_percentile, deghost_margin)
+        return bg
     except Exception:
         return None
 
@@ -355,8 +364,8 @@ def _build_app(video_path: Path, cfg: AnyTrackConfig):
             self.work = dataclasses.replace(cfg)   # live-editable working config
             # Experiment knobs for the dwell-contamination A/B (background method +
             # candidate gating). Defaults reproduce the shipped pipeline.
-            self.opts = dict(bg_method="gmm", percentile=90,
-                             contrast_gate=0.0, darkness_weight=0.0)
+            self.opts = dict(bg_method="gmm", percentile=90, contrast_gate=0.0,
+                             darkness_weight=0.0, deghost=False, deghost_margin=15)
             self.cap = cv2.VideoCapture(str(video_path))
             self.n = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
             self.fps = self.cap.get(cv2.CAP_PROP_FPS) or 20.0
@@ -424,9 +433,13 @@ def _build_app(video_path: Path, cfg: AnyTrackConfig):
             bm.pack(fill="x", pady=(0, 6))
             bm.bind("<<ComboboxSelected>>", lambda e: self._on_bg_method())
             self._add_opt_slider(exp, "percentile", 50, 99, self.opts["percentile"])
+            self.deghost_var = tk.BooleanVar(value=self.opts["deghost"])
+            tb.Checkbutton(exp, text="de-ghost (lift baked-in fly)", variable=self.deghost_var,
+                           bootstyle="round-toggle", command=self._on_deghost).pack(fill="x", pady=(6, 0))
+            self._add_opt_slider(exp, "deghost_margin", 5, 60, self.opts["deghost_margin"])
             self._add_opt_slider(exp, "contrast_gate", 0, 60, self.opts["contrast_gate"])
             self._add_opt_slider(exp, "darkness_weight", 0, 300, self.opts["darkness_weight"], div=100.0)
-            tb.Label(exp, text="(bg/percentile rebuild+retrack;\ncontrast_gate previews on candidates;\ngate/weight apply on Re-track)",
+            tb.Label(exp, text="(bg/percentile/de-ghost rebuild+retrack;\ncontrast_gate previews on candidates;\ngate/weight apply on Re-track)",
                      font=("", 8), bootstyle="secondary").pack(pady=(8, 0))
 
             bot = tb.Frame(self); bot.pack(side="bottom", fill="x", padx=8, pady=6)
@@ -573,13 +586,17 @@ def _build_app(video_path: Path, cfg: AnyTrackConfig):
         def _on_opt(self, name, value, var):
             var.set(f"{value:g}")
             self.opts[name] = value
-            if name == "percentile":
-                self._rebuild_bg()          # bg depends on percentile → rebuild + retrack
+            if name in ("percentile", "deghost_margin"):
+                self._rebuild_bg()          # bg depends on these → rebuild + retrack
             else:                            # contrast_gate previews live; both apply on Re-track
                 self._render()
 
         def _on_bg_method(self):
             self.opts["bg_method"] = self.bg_method_var.get()
+            self._rebuild_bg()
+
+        def _on_deghost(self):
+            self.opts["deghost"] = bool(self.deghost_var.get())
             self._rebuild_bg()
 
         def _rebuild_bg(self):
@@ -592,9 +609,11 @@ def _build_app(video_path: Path, cfg: AnyTrackConfig):
 
             def job():
                 m, p = self.opts["bg_method"], self.opts["percentile"]
-                self._set_status(f"rebuilding {roi.name} bg ({m})…")
+                dg = self.opts["deghost"]
+                self._set_status(f"rebuilding {roi.name} bg ({m}{', de-ghost' if dg else ''})…")
                 bg = build_roi_background(video_path, roi, self.cfg0, method=m, percentile=p,
-                                          tracks=self.tracks.get(roi.name))
+                                          tracks=self.tracks.get(roi.name),
+                                          apply_deghost=dg, deghost_margin=self.opts["deghost_margin"])
                 if bg is not None:
                     self.roi_bg[roi.name] = bg
                     self._set_status(f"re-tracking {roi.name}…")
@@ -603,7 +622,7 @@ def _build_app(video_path: Path, cfg: AnyTrackConfig):
                         contrast_gate=self.opts["contrast_gate"],
                         darkness_weight=self.opts["darkness_weight"])
                 self.after(0, lambda: (self.retrack_btn.configure(state="normal"),
-                                       self._set_status(f"ready · {roi.name} · bg={m}"),
+                                       self._set_status(f"ready · {roi.name} · bg={m}{'+dg' if dg else ''}"),
                                        self._render()))
             threading.Thread(target=job, daemon=True).start()
 
