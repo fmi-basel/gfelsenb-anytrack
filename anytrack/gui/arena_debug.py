@@ -251,6 +251,21 @@ def _build_app(video_path: Path, cfg: AnyTrackConfig, arena: Optional[str]):
             self.status = tb.Label(top, text="preparing…")
             self.status.pack(side="left", padx=8)
 
+            # Pack the bottom nav BEFORE the expanding body: an expand=True sibling
+            # packed first eats the whole cavity and squeezes a later side="bottom"
+            # strip to zero height (that was the vanishing frame buttons).
+            nav = tb.Frame(self, padding=8)
+            nav.pack(side="bottom", fill="x")
+            tb.Button(nav, text="◀", width=3, command=lambda: self._step(-1)).pack(side="left")
+            tb.Button(nav, text="▶", width=3, command=lambda: self._step(1)).pack(side="left", padx=(2, 8))
+            # takefocus=False so the slider never grabs the arrow keys away from the
+            # window-level ←/→ frame-step bindings.
+            self.scale = tb.Scale(nav, from_=0, to=max(0, self.n - 1), orient="horizontal",
+                                  takefocus=False, command=self._on_scrub)
+            self.scale.pack(side="left", fill="x", expand=True)
+            self.frame_lbl = tb.Label(nav, text="0", width=14)
+            self.frame_lbl.pack(side="left", padx=8)
+
             body = tb.Frame(self, padding=(8, 0))
             body.pack(side="top", fill="both", expand=True)
             self.canvas = tk.Label(body, background="#111")
@@ -272,15 +287,12 @@ def _build_app(video_path: Path, cfg: AnyTrackConfig, arena: Optional[str]):
             tb.Entry(panel, textvariable=self.trail_var, width=8).pack(anchor="w")
             tb.Button(panel, text="apply trail", command=self._render).pack(anchor="w", pady=(2, 0))
 
-            nav = tb.Frame(self, padding=8)
-            nav.pack(side="bottom", fill="x")
-            tb.Button(nav, text="◀", width=3, command=lambda: self._step(-1)).pack(side="left")
-            tb.Button(nav, text="▶", width=3, command=lambda: self._step(1)).pack(side="left", padx=(2, 8))
-            self.scale = tb.Scale(nav, from_=0, to=max(0, self.n - 1), orient="horizontal",
-                                  command=self._on_scrub)
-            self.scale.pack(side="left", fill="x", expand=True)
-            self.frame_lbl = tb.Label(nav, text="0", width=14)
-            self.frame_lbl.pack(side="left", padx=8)
+            # ←/→ step one frame back / forward, bound on the window so they work
+            # whatever has focus (the readonly comboboxes + focus-less slider don't
+            # swallow them). Keeps working even if the nav buttons are off-screen.
+            self.bind("<Left>", lambda e: self._step(-1))
+            self.bind("<Right>", lambda e: self._step(1))
+            self.focus_set()
 
         def _pick_color(self, key):
             init = _bgr_to_hex(self.colors[key])
