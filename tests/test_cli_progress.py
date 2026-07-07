@@ -49,3 +49,16 @@ def test_format_helpers_do_not_raise(capsys):
     info("detail")
     out = capsys.readouterr().out
     assert "title" in out and "doing thing" in out
+
+
+def test_name_column_width_fits_full_filename():
+    from anytrack.cli_progress import _LiveLine, BatchProgressGroup
+    from anytrack.run import _name_col_width
+    name = "localsearch_2025-12-11T09_57_32.avi"   # 35 chars
+
+    assert name not in _LiveLine(1, 8, name).render("|")            # old default clips at 26
+    assert name in _LiveLine(1, 8, name, name_w=len(name)).render("|")  # override shows full name
+
+    assert _name_col_width([name]) >= 16 and _name_col_width(["ab"]) >= 16   # floors
+    g = BatchProgressGroup(8, name_w=_name_col_width([name]))       # threads to every slot
+    assert g.name_w == _name_col_width([name])

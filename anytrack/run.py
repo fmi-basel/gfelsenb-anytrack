@@ -141,7 +141,8 @@ def _run_one(video_path, idx: int, n: int, *, args, cfg, single, group=None) -> 
             bp = group.acquire(idx, Path(video_path).name)
         else:
             from .cli_progress import BatchProgress
-            bp = BatchProgress(idx, n, Path(video_path).name)
+            bp = BatchProgress(idx, n, Path(video_path).name,
+                               name_w=_name_col_width([Path(video_path).name]))
 
     timing = args.timing if (single and args.timing) else Path(video_path).with_suffix(".csv")
     if not Path(timing).exists():
@@ -606,6 +607,16 @@ def _batch_concurrency(cfg, n_videos: int) -> int:
     return max(1, min(max(1, cores // per_video), n_videos))
 
 
+def _name_col_width(names) -> int:
+    """Width for the batch UI's filename column: fit the longest name, but cap so
+    the live line still fits the terminal (reserve ~50 cols for the spinner, index,
+    stage bar and clock). Floors at 16 so very short names don't look cramped."""
+    import shutil
+    longest = max((len(str(n)) for n in names), default=26)
+    term_w = shutil.get_terminal_size(fallback=(100, 24)).columns
+    return max(16, min(longest, term_w - 50))
+
+
 def _run_batch(videos, *, args, cfg, single):
     """Process a batch, up to K videos concurrently, with a multi-line live UI.
 
@@ -619,7 +630,7 @@ def _run_batch(videos, *, args, cfg, single):
     n = len(videos)
     k = _batch_concurrency(cfg, n)
     batch_banner(n, ("fast" if cfg.fast_mode else "legacy") + f" · {k}× concurrent")
-    group = BatchProgressGroup(n)
+    group = BatchProgressGroup(n, name_w=_name_col_width([Path(v).name for v in videos]))
     results = [None] * n
     try:
         with ThreadPoolExecutor(max_workers=k) as ex:

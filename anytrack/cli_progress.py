@@ -219,12 +219,14 @@ class _LiveLine:
     name + stage bar/label + clock); :meth:`result_line` the committed ✓/✗ result.
     """
 
-    _NAME_W = 26
+    _NAME_W = 26   # default name-column width; overridden per-run to fit filenames
 
-    def __init__(self, idx: int, total: int, name: str):
+    def __init__(self, idx: int, total: int, name: str, name_w: Optional[int] = None):
         self.idx = idx
         self.total = total
         self.name = name
+        if name_w:
+            self._NAME_W = int(name_w)   # instance override (fit to the batch's names)
         self.phase_key = "roi"
         self.phase_text = "starting…"
         self.fn = 0        # frames processed in the current stage
@@ -293,8 +295,8 @@ class BatchProgress(_LiveLine):
     *concurrent* videos use :class:`BatchProgressGroup` instead.
     """
 
-    def __init__(self, idx: int, total: int, name: str):
-        super().__init__(idx, total, name)
+    def __init__(self, idx: int, total: int, name: str, name_w: Optional[int] = None):
+        super().__init__(idx, total, name, name_w=name_w)
         self._tty = bool(getattr(sys.stdout, "isatty", lambda: False)())
         self._lock = threading.Lock()
         self._spin = 0
@@ -358,8 +360,9 @@ class BatchProgressGroup:
     shrinking live region. Off a TTY, only committed result lines are printed.
     """
 
-    def __init__(self, total: int):
+    def __init__(self, total: int, name_w: Optional[int] = None):
         self.total = total
+        self.name_w = name_w        # name-column width shared by all slots
         self._tty = bool(getattr(sys.stdout, "isatty", lambda: False)())
         self._lock = threading.Lock()
         self._slots: list = []      # active _Slot, in acquisition order
@@ -427,7 +430,7 @@ class _Slot(_LiveLine):
     """One video's line inside a :class:`BatchProgressGroup` (threadless)."""
 
     def __init__(self, group: BatchProgressGroup, idx: int, name: str):
-        super().__init__(idx, group.total, name)
+        super().__init__(idx, group.total, name, name_w=getattr(group, "name_w", None))
         self._group = group
 
     def phase(self, key: str, text: str) -> None:
