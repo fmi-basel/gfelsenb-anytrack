@@ -171,6 +171,7 @@ class AnyTrackConfig:
     qc_overlay_crf: int = 23            # libx264 CRF for the overlay video (lower = better/bigger)
     qc_overlay_stride: int = 5          # render every Nth frame in the overlay (1 = every frame)
     qc_overlay_trace: int = -1          # overlay trail length in frames up to the current frame (-1 = full trace from the start)
+    qc_overlay_flag_labels: bool = True # annotate each red flag ring with which flag(s) fired (area/jump/oob/multi/lowC)
     # Hardware H.264 (VideoToolbox) is ~1.8x faster than libx264 only at stride=1;
     # at the default stride=5 libx264 is faster AND ~12x smaller (adaptive CRF vs
     # fixed bitrate), so HW defaults OFF. Turn on for full-framerate overlays.

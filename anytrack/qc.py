@@ -34,6 +34,16 @@ from .preprocess import check_ffmpeg_available, get_ffmpeg_path
 # Per-frame boolean failure-flag columns produced by :func:`compute_flags`.
 FLAG_COLUMNS = ["flag_area", "flag_jump", "flag_crop_oob", "flag_multi", "flag_low_contrast"]
 
+# Short labels drawn next to the red flag ring in the overlay video.
+FLAG_ABBR = {"flag_area": "area", "flag_jump": "jump", "flag_crop_oob": "oob",
+             "flag_multi": "multi", "flag_low_contrast": "lowC"}
+
+
+def flag_label(row) -> str:
+    """Comma-joined abbreviations of the failure flags set on ``row`` (a dict or
+    a DataFrame row), in :data:`FLAG_COLUMNS` order; empty string if none set."""
+    return ",".join(FLAG_ABBR[c] for c in FLAG_COLUMNS if bool(row.get(c, False)))
+
 # Visually distinct BGR colors cycled per ROI (shared by overlay + plots).
 _ROI_PALETTE_BGR = [
     (244, 133, 66), (83, 168, 52), (7, 193, 255), (53, 67, 234),
@@ -625,6 +635,7 @@ def render_overlay(
     out_path = Path(out_path)
     if trail_len is None:
         trail_len = int(getattr(cfg, "qc_overlay_trace", -1))
+    flag_labels = bool(getattr(cfg, "qc_overlay_flag_labels", True))
     flagged = compute_flags(df, video, cfg)
 
     cap = cv2.VideoCapture(str(video.video_path))
@@ -763,8 +774,21 @@ def render_overlay(
                         cv2.putText(canvas, f"{dmm:.0f}mm", (cx + dot + 2, cy - 2),
                                     F, 0.45 * mag, PORT_COL, 1, cv2.LINE_AA)
                 cv2.circle(canvas, (cx, cy), dot, col, -1)
-                if any(bool(r.get(c, False)) for c in FLAG_COLUMNS):
+                lbl = flag_label(r)
+                if lbl:                                    # red ring + which flag(s) fired
                     cv2.circle(canvas, (cx, cy), ring, (0, 0, 255), th)
+                    if flag_labels:
+                        fs = max(0.32, 0.4 * mag)
+                        (tw, tht2), _ = cv2.getTextSize(lbl, F, fs, 1)
+                        chh, cww = canvas.shape[:2]
+                        lx = cx + ring + 2
+                        if lx + tw > cww:              # overflow right → left of the ring
+                            lx = max(2, cx - ring - 2 - tw)
+                        ly = cy + ring + tht2 + 1
+                        if ly > chh - 2:               # overflow bottom → above the ring
+                            ly = max(tht2 + 2, cy - ring - 2)
+                        cv2.putText(canvas, lbl, (lx, ly), F, fs, (0, 0, 0), th + 1, cv2.LINE_AA)
+                        cv2.putText(canvas, lbl, (lx, ly), F, fs, (0, 0, 255), 1, cv2.LINE_AA)
         if pose_prep is not None:
             draw_pose(canvas, fidx, pose_prep, lambda X, Y: (tx(X), ty(Y)),
                       thickness=th, radius=pose_radius)

@@ -125,6 +125,55 @@ def test_overlay_trace_length_and_frame_number(tmp_path):
     assert len(xw) and xw.mean() > W / 2 and yw.mean() > H / 2   # bottom-right quadrant
 
 
+def test_flag_label():
+    from anytrack.qc import flag_label
+    assert flag_label({"flag_jump": True, "flag_multi": True}) == "jump,multi"   # FLAG_COLUMNS order
+    assert flag_label({"flag_area": True, "flag_low_contrast": True}) == "area,lowC"
+    assert flag_label({}) == "" and flag_label({"flag_jump": False}) == ""
+
+
+def _count_red(path):
+    cap = cv2.VideoCapture(str(path)); n = 0
+    while True:
+        ok, f = cap.read()
+        if not ok:
+            break
+        n += int(((f[:, :, 2] > 150) & (f[:, :, 0] < 80) & (f[:, :, 1] < 80)).sum())
+    cap.release()
+    return n
+
+
+def test_overlay_flag_ring_and_label(tmp_path):
+    """Flagged frames get a red ring + flag label; the toggle removes the label."""
+    N, H, W = 8, 200, 200
+    vp = tmp_path / "v.avi"
+    wr = cv2.VideoWriter(str(vp), cv2.VideoWriter_fourcc(*"MJPG"), 30.0, (W, H), isColor=True)
+    if not wr.isOpened():
+        wr.release(); pytest.skip("No MJPG encoder available")
+    for _ in range(N):
+        wr.write(cv2.cvtColor(np.full((H, W), 200, np.uint8), cv2.COLOR_GRAY2BGR))
+    wr.release()
+    base = dict(roi=["r0"] * N, track_id=[0] * N, frame=list(range(N)),
+                y=[100.0] * N, t_s=[i / 30 for i in range(N)], area=[50.0] * N,
+                n_candidates=[1] * N)
+    df_flag = pd.DataFrame({**base, "x": [100.0, 100, 100, 100, 170, 100, 100, 100]})  # jump at f4/f5
+    df_clean = pd.DataFrame({**base, "x": [100.0] * N})
+    video = SimpleNamespace(video_path=vp, width=W, height=H, frame_count=N,
+                            fps_nominal=30.0, rois=[])
+    cfg = AnyTrackConfig(); cfg.qc_overlay_downscale = 1; cfg.qc_overlay_stride = 1
+
+    p_flag, _ = render_overlay(video, df_flag, cfg, tmp_path / "flag.mp4")
+    p_clean, _ = render_overlay(video, df_clean, cfg, tmp_path / "clean.mp4")
+    if p_flag is None or p_clean is None:
+        pytest.skip("No overlay encoder available")
+    red_flag, red_clean = _count_red(p_flag), _count_red(p_clean)
+    assert red_flag > red_clean                       # ring + label only on flagged frames
+
+    cfg.qc_overlay_flag_labels = False                # toggle off: ring stays, label goes
+    p_nolabel, _ = render_overlay(video, df_flag, cfg, tmp_path / "nolabel.mp4")
+    assert _count_red(p_nolabel) < red_flag
+
+
 def test_overlay_trace_defaults_to_config(tmp_path):
     """trail_len=None resolves to cfg.qc_overlay_trace (default -1 = full)."""
     N, H, W = 16, 160, 160
