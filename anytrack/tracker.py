@@ -85,6 +85,11 @@ class CentroidTracker:
         self.kf: Optional[Kalman2D] = None
         self.misses = 0
         self.last: Tuple[float, float] = center_xy  # last confirmed position
+        # Diagnostics (record-only; do not affect linking): the prediction point
+        # and the acceptance-gate radius used on the most recent step(). Consumed
+        # by the debug GUI to draw the Kalman prediction + gate circle.
+        self.last_pred: Optional[Tuple[float, float]] = None
+        self.last_gate: float = 0.0
 
     def _seed(self, x: float, y: float):
         """(Re-)initialize the filter at a known position and clear the miss streak."""
@@ -118,6 +123,8 @@ class CentroidTracker:
         # (fly briefly moving faster than max_jump) is re-acquired within a
         # couple of frames instead of waiting out miss_tolerance.
         eff_jump = self.max_jump * (1 + self.misses)
+        self.last_pred = (px, py)      # record-only diagnostics for the debug GUI
+        self.last_gate = eff_jump
         chosen = greedy_assign((px, py), candidates, eff_jump)
 
         if chosen is None:

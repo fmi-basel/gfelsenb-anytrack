@@ -29,6 +29,7 @@ anytrack-qc = "anytrack.qc:main"
 anytrack-label = "anytrack.pose.label_gui:main"
 anytrack-train = "anytrack.pose.train:main"
 anytrack-debug = "anytrack.gui.debug_app:main"
+anytrack-arena-debug = "anytrack.gui.arena_debug:main"
 
 [project.optional-dependencies]
 # Pose labeling/export bridge (Milestone B). Optional: the classical tracker and
