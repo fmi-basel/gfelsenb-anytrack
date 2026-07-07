@@ -201,13 +201,15 @@
       So a baked-in stationary fly <i>is</i> recoverable in principle — my earlier "impossible
       spatially" verdict was too absolute.</li>
   </ul>
-  <p><b>But on 2025-12-11 it doesn't apply</b>, for an instructive reason: the <i>production</i>
-  per-ROI background for the flagged arena already yields <b>100% sample-detection</b> (it does not
-  bake the fly). Its low <i>tracked-frame</i> coverage (~54%) is a <b>linking</b> problem — the
-  tracked positions scatter across the whole arena (std ≈157&thinsp;px) as the tracker chases
-  spurious candidates — not a baked-fly problem, so <code>refine_stuck</code> correctly finds
-  nothing to fill. That residual is a tracking/candidate-disambiguation issue, out of scope for
-  background modelling.</p>
+  <p><b>And on 2025-12-11 it works.</b> A faithful streaming diagnostic (the ROI decoded through
+  the same FFmpeg crop→scale→gray filter as production, so it matches the production background)
+  confirms the flagged arena_01 is genuinely <b>under-detected</b>: only ~0.04 candidates/frame,
+  <b>4% coverage</b> — the fly is baked in and invisible to subtraction. Running the two-pass
+  <code>--refine-stuck</code> (fill the fly, spare the port) takes it to <b>100% coverage</b> with a
+  tight track (std ≈4&thinsp;px), end-to-end <b>54%→100%</b>. (An earlier reading of this arena as a
+  "linking" problem came from a confounded probe — cv2-decoded frames subtracted against the
+  FFmpeg-built background reintroduce the rim scaler mismatch and manufacture spurious candidates;
+  the faithful decode shows the real cause is under-detection.)</p>
   <p><b>Conclusion:</b> a baked-in stationary fly is recoverable (fill-fly-spare-port, oracle-
   validated) and shipped as opt-in <code>--refine-stuck</code>; a <i>perfectly</i> never-moved fly
   with no baked-in background signature is still best handled by <b>flagging</b> via its tracking
