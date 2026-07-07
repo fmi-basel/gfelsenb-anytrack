@@ -414,7 +414,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--stride", type=int, default=None,
                     help="Track every Nth frame and interpolate the rest (streaming path; overrides config).")
     ap.add_argument("--workers", type=int, default=None,
-                    help="Parallel tracking workers for fast mode (overrides config).")
+                    help="Parallel tracking workers per video for fast mode (overrides config).")
+    ap.add_argument("--concurrency", "--jobs", dest="concurrency", type=int, default=None,
+                    help="How many videos to process at once in batch mode (overrides "
+                         "cfg.batch_concurrency; 1 = sequential). Default auto = "
+                         "core_budget // workers. Only affects --video <directory>.")
     ap.add_argument("--roi", action="append", default=None, metavar="NAME",
                     help="Restrict the run to these arena(s) by name (e.g. --roi arena_04). "
                          "Repeatable or comma-separated. Applied after ROI detection, so "
@@ -502,6 +506,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         cfg.track_stride = max(1, args.stride)
     if args.workers is not None:
         cfg.n_tracking_workers = args.workers
+    if args.concurrency is not None:
+        cfg.batch_concurrency = max(1, args.concurrency)
     if args.qc_full:
         cfg.qc_overlay_stride = 1
         cfg.qc_overlay_downscale = 1

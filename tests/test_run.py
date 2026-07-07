@@ -142,6 +142,17 @@ def test_anytrack_run_writes_custom_output(tmp_path, monkeypatch):
     assert df["x"].max() - df["x"].min() > 5  # captured the rightward motion
 
 
+def test_batch_concurrency_resolution():
+    """--concurrency (cfg.batch_concurrency) forces K; 0 = auto = cores // workers."""
+    cfg = AnyTrackConfig(batch_concurrency=6, n_tracking_workers=4)
+    assert run_mod._batch_concurrency(cfg, n_videos=8) == 6      # forced value
+    assert run_mod._batch_concurrency(cfg, n_videos=3) == 3      # clamped to n_videos
+    auto = AnyTrackConfig(batch_concurrency=0, batch_core_budget=12, n_tracking_workers=4)
+    assert run_mod._batch_concurrency(auto, n_videos=8) == 3     # 12 // 4
+    seq = AnyTrackConfig(batch_concurrency=1)
+    assert run_mod._batch_concurrency(seq, n_videos=8) == 1      # sequential
+
+
 def test_print_run_config(capsys):
     """_print_run_config prints the file path, a summary, and flags non-defaults."""
     run_mod._print_run_config(AnyTrackConfig())          # all defaults
