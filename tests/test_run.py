@@ -142,6 +142,20 @@ def test_anytrack_run_writes_custom_output(tmp_path, monkeypatch):
     assert df["x"].max() - df["x"].min() > 5  # captured the rightward motion
 
 
+def test_print_run_config(capsys):
+    """_print_run_config prints the file path, a summary, and flags non-defaults."""
+    run_mod._print_run_config(AnyTrackConfig())          # all defaults
+    out = capsys.readouterr().out
+    assert "config" in out.lower() and "0 non-default" in out
+    assert "thr_method" in out                            # full config is listed
+
+    run_mod._print_run_config(AnyTrackConfig(thr_method="otsu", thr_fixed=35))
+    out = capsys.readouterr().out
+    assert "2 non-default" in out
+    assert "thr_method" in out and "otsu" in out
+    assert "non-default (default 'fixed')" in out         # the override is flagged
+
+
 def _fake_ensure_two(v, cfg, background=None):
     v.rois = [CircleROI(name="r0", cx=25, cy=40, r=20),
               CircleROI(name="r1", cx=55, cy=40, r=20)]

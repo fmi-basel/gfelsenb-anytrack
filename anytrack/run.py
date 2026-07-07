@@ -361,6 +361,32 @@ def _run_one(video_path, idx: int, n: int, *, args, cfg, single, group=None) -> 
     return len(df)
 
 
+def _print_run_config(cfg) -> None:
+    """Print the effective config for this run: the config-file path plus every
+    setting, with any non-default value flagged. Makes a run self-documenting and
+    reproducible, and surfaces silent overrides (e.g. a stale thr_method="otsu").
+    """
+    import dataclasses
+    from .config import config_path, AnyTrackConfig
+
+    defaults = AnyTrackConfig()
+    fields = list(dataclasses.fields(cfg))
+    changed = [f.name for f in fields if getattr(cfg, f.name) != getattr(defaults, f.name)]
+    header("config")
+    try:
+        info(f"file: {config_path()}")
+    except Exception:
+        pass
+    info(f"{len(fields)} settings · {len(changed)} non-default"
+         + (f": {', '.join(changed)}" if changed else ""))
+    width = max(len(f.name) for f in fields)
+    for f in fields:
+        val = getattr(cfg, f.name)
+        dv = getattr(defaults, f.name)
+        mark = f"   ← non-default (default {dv!r})" if val != dv else ""
+        print(f"    {f.name:<{width}} = {val!r}{mark}")
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     import argparse
 
@@ -529,6 +555,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     videos = resolve_videos(args.video, _validator)
     if not videos:
         ap.error(f"no videos to process for {args.video}")
+
+    _print_run_config(cfg)   # print the effective config first (reproducibility)
 
     n = len(videos)
     t_all = time.perf_counter()
