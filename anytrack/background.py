@@ -14,6 +14,7 @@ class BackgroundModel:
     thresholds: Optional[np.ndarray] = None  # float32, NaN where 1-component used
     arena_mask: Optional[np.ndarray] = None  # uint8 {0,255} - combined arena mask
     arena_circles: Optional[List[Tuple[float, float, float]]] = None  # [(cx, cy, r), ...]
+    samples: Optional[np.ndarray] = None  # (N, H, W) uint8 - the sampled frames (only when requested)
 
     @property
     def image(self) -> np.ndarray:
@@ -454,6 +455,7 @@ def build_background(
     debug_hook: Optional[Callable[[str, Dict[str, Any]], None]] = None,
     debug_stride: int = 1,  # Kept for API compatibility, not used
     debug_max_side: int = 0,  # Kept for API compatibility, not used
+    return_samples: bool = False,
 ) -> BackgroundModel:
     """Build background using GMM approach.
 
@@ -507,6 +509,7 @@ def build_background(
         thresholds=thresholds,
         arena_mask=arena_mask,
         arena_circles=arena_circles,
+        samples=samples if return_samples else None,
     )
 
 
@@ -584,7 +587,7 @@ class BackgroundState:
         self.prev_fg = m
 
 
-def build_background_image(video_path, cfg, progress_hook=None) -> np.ndarray:
+def build_background_image(video_path, cfg, progress_hook=None, return_samples: bool = False):
     """Build the model background image using the config's GMM/arena params.
 
     Thin wrapper around :func:`build_background` with the standard config
@@ -592,6 +595,11 @@ def build_background_image(video_path, cfg, progress_hook=None) -> np.ndarray:
     ``progress_hook`` is given, the frame-sampling loop is surfaced as
     ``("frames", {"stage": "roi", "n", "total"})`` so the CLI can draw a
     frame-based ROI-detection bar.
+
+    Returns the background image (uint8). With ``return_samples=True`` returns
+    ``(image, samples)`` where ``samples`` is the ``(N, H, W)`` uint8 stack the
+    background was built from — so a caller can crop+scale it into per-ROI
+    backgrounds instead of decoding the video a second time.
     """
     debug_hook = None
     if progress_hook is not None:
@@ -606,7 +614,7 @@ def build_background_image(video_path, cfg, progress_hook=None) -> np.ndarray:
                 except Exception:
                     pass
 
-    return build_background(
+    model = build_background(
         str(video_path),
         n_samples=cfg.gmm_n_samples,
         bic_improvement=cfg.gmm_bic_improvement,
@@ -618,4 +626,6 @@ def build_background_image(video_path, cfg, progress_hook=None) -> np.ndarray:
         arena_blur_sigma=cfg.arena_blur_sigma,
         debug=progress_hook is not None,
         debug_hook=debug_hook,
-    ).image
+        return_samples=return_samples,
+    )
+    return (model.image, model.samples) if return_samples else model.image

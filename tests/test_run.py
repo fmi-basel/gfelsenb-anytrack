@@ -183,7 +183,7 @@ def test_save_frame_diff(tmp_path):
     assert diff[10, 10] < 10                            # untouched background ~ 0
 
 
-def _fake_roi_bgs(video_path, rois, cfg, fly_masks=None, flags=None):
+def _fake_roi_bgs(video_path, rois, cfg, fly_masks=None, flags=None, sample_stack=None):
     """Stand-in for build_roi_backgrounds_uniform: flat backgrounds + a small mask."""
     out = {}
     for r in rois:
@@ -207,8 +207,10 @@ def test_anytrack_run_bg_only(tmp_path, monkeypatch):
 
     monkeypatch.setattr(run_mod, "load_config", _synthetic_cfg)
     monkeypatch.setattr(run_mod, "ensure_rois", _fake_ensure)
-    monkeypatch.setattr(run_mod, "build_background_image",
-                        lambda *a, **k: np.full((80, 80), 200, np.uint8))
+    def _fake_bg_image(*a, return_samples=False, **k):
+        img = np.full((80, 80), 200, np.uint8)
+        return (img, np.full((3, 80, 80), 200, np.uint8)) if return_samples else img
+    monkeypatch.setattr(run_mod, "build_background_image", _fake_bg_image)
     import anytrack.preprocess as pp
     monkeypatch.setattr(pp, "build_roi_backgrounds_uniform", _fake_roi_bgs)
 

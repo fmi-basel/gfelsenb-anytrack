@@ -165,9 +165,18 @@ def _run_one(video_path, idx: int, n: int, *, args, cfg, single, group=None) -> 
     bg_only = getattr(args, "bg_only", False)
     port_on = getattr(cfg, "port_detect_enabled", False)
     # Build the model background once; reuse it for ROI detection, QC, port detection
-    # (and always in --bg-only, where the backgrounds are the deliverable).
-    bg_img = (build_background_image(video.video_path, cfg, progress_hook=progress)
-              if (not video.rois or args.qc or bg_only or port_on) else None)
+    # (and always in --bg-only, where the backgrounds are the deliverable). When the
+    # per-ROI backgrounds will be sampled by reuse (bg_roi_sample="reuse"), keep the
+    # decoded sample stack so they need no second decode of the video.
+    bg_img = None
+    bg_samples = None
+    want_reuse = getattr(cfg, "bg_roi_sample", "ffmpeg") == "reuse"
+    if not video.rois or args.qc or bg_only or port_on:
+        if want_reuse:
+            bg_img, bg_samples = build_background_image(
+                video.video_path, cfg, progress_hook=progress, return_samples=True)
+        else:
+            bg_img = build_background_image(video.video_path, cfg, progress_hook=progress)
     ensure_rois(video, cfg, background=bg_img)
     if not video.rois:
         if bp is not None:
@@ -204,7 +213,9 @@ def _run_one(video_path, idx: int, n: int, *, args, cfg, single, group=None) -> 
             bp.phase("roi", "modelling backgrounds…")
         from .preprocess import build_roi_backgrounds_uniform
         roi_bgs = build_roi_backgrounds_uniform(video.video_path, video.rois, cfg,
-                                                 fly_masks=fly_masks, flags=bg_flags)
+                                                 fly_masks=fly_masks, flags=bg_flags,
+                                                 sample_stack=bg_samples)
+        bg_samples = None   # release the full-frame stack (can be ~0.5 GB) early
 
     # --bg-only: save the backgrounds and stop before tracking.
     if bg_only:
@@ -378,6 +389,17 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help="Follow-window size in full-res px (default 256).")
     ap.add_argument("--crop-size", type=int, default=0,
                     help="Output px (square) for a cropped QC overlay (default from config: 800).")
+    ap.add_argument("--trace", type=int, default=None,
+                    help="QC overlay trail length in frames up to the current frame "
+                         "(-1 = full trace from the start; default from config: -1).")
+    ap.add_argument("--bg-sample", "--bg_sample", dest="bg_sample",
+                    choices=["auto", "ffmpeg", "reuse"], default="auto",
+                    help="How to sample frames for the per-ROI background: 'ffmpeg' "
+                         "(decode-once, scaler-consistent with tracking) or 'reuse' "
+                         "(crop+scale the full-frame samples already decoded for ROI "
+                         "detection — no second decode, ~4x faster). 'auto' = reuse "
+                         "for --bg-only (no tracking, so scaler-identical output is "
+                         "unnecessary), else ffmpeg.")
     ap.add_argument("--crops", action="store_true",
                     help="Also export centroid-centered crops (A5).")
     ap.add_argument("--save-roi-bg", "--save_roi_bg", dest="save_roi_bg", action="store_true",
@@ -430,6 +452,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         cfg.qc_overlay_crf = 16
     if args.qc_overlay_stride is not None:  # explicit stride wins over --qc-full
         cfg.qc_overlay_stride = max(1, args.qc_overlay_stride)
+    if args.trace is not None:
+        cfg.qc_overlay_trace = args.trace
+    if args.bg_sample == "auto":            # reuse is safe for --bg-only (no tracking)
+        cfg.bg_roi_sample = "reuse" if args.bg_only else "ffmpeg"
+    else:
+        cfg.bg_roi_sample = args.bg_sample
 
     if args.pose_model is not None:
         cfg.sleap_model_path = str(args.pose_model)

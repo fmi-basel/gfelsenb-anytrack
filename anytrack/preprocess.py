@@ -492,7 +492,72 @@ def _fg_excluded(stack, cfg, tracks, percentile, sample_idxs):
     return bg.astype(np.uint8)
 
 
-def build_roi_backgrounds_uniform(video_path, rois, cfg, fly_masks=None, flags=None):
+def _reduce_roi_frames(name, frames, cfg, fly_masks=None, flags=None):
+    """Turn one ROI's scaled gray frame stack into its background image.
+
+    Shared by both sampling paths (FFmpeg decode + full-frame-sample reuse) so
+    the per-ROI reduction lives in one place. The GMM is fit only when it is
+    actually consumed — for the ``fly_masks`` overlay, or as the background
+    itself in legacy (non-adaptive) mode — so an adaptive run without an overlay
+    request skips the fit entirely (it was previously always paid, ~1.3s/video).
+    """
+    import numpy as np
+    from .background import fit_gmm_background
+
+    adaptive = getattr(cfg, "bg_model", "adaptive") == "adaptive"
+    gmm = thr = None
+    if fly_masks is not None or not adaptive:
+        gmm, thr = fit_gmm_background(
+            frames, bic_improvement=cfg.gmm_bic_improvement, lowp=cfg.gmm_lowp,
+            min_std=cfg.gmm_min_std, reg_covar=cfg.gmm_reg_covar,
+        )
+    if fly_masks is not None:        # 2-component pixels (thr not NaN) = fly footprint
+        fly_masks[name] = np.ascontiguousarray(~np.isnan(thr))
+    if adaptive:
+        bg, binfo = model_background(frames, cfg)
+        if flags is not None:
+            flags[name] = binfo
+        return np.ascontiguousarray(bg)
+    if getattr(cfg, "bg_deghost", False):    # legacy: brighter-component GMM + de-ghost
+        gmm = _deghost_background(gmm, frames, cfg)
+    return np.ascontiguousarray(gmm)
+
+
+def _roi_backgrounds_from_stack(sample_stack, rois, cfg, fly_masks=None, flags=None):
+    """Per-ROI backgrounds by cropping+scaling the already-decoded full-frame
+    ``sample_stack`` (``(N, H, W)`` uint8 gray) — no second video decode.
+
+    Crops each ROI then downscales per frame with ``INTER_AREA`` (crop-THEN-scale,
+    matching the FFmpeg filter order so rim pixels aren't contaminated by
+    out-of-arena neighbours). The resulting per-ROI stack is fed through the same
+    :func:`_reduce_roi_frames` reduction as the FFmpeg path.
+    """
+    import numpy as np
+    import cv2
+
+    downscale = int(cfg.roi_downscale)
+    H, W = int(sample_stack.shape[1]), int(sample_stack.shape[2])
+    out = {}
+    for roi in rois:
+        crop_size, x0, y0, scaled = roi_crop_geometry(roi, downscale)
+        x1, y1 = min(x0 + crop_size, W), min(y0 + crop_size, H)
+        sub = sample_stack[:, y0:y1, x0:x1]
+        if sub.shape[1] != crop_size or sub.shape[2] != crop_size:   # ROI off-frame (rare)
+            padded = np.zeros((sub.shape[0], crop_size, crop_size), sub.dtype)
+            padded[:, :sub.shape[1], :sub.shape[2]] = sub
+            sub = padded
+        if downscale > 1:
+            frames = np.empty((sub.shape[0], scaled, scaled), np.uint8)
+            for i in range(sub.shape[0]):
+                frames[i] = cv2.resize(sub[i], (scaled, scaled), interpolation=cv2.INTER_AREA)
+        else:
+            frames = np.ascontiguousarray(sub)
+        out[roi.name] = _reduce_roi_frames(roi.name, frames, cfg, fly_masks, flags)
+    return out
+
+
+def build_roi_backgrounds_uniform(video_path, rois, cfg, fly_masks=None, flags=None,
+                                  sample_stack=None):
     """Per-ROI GMM backgrounds from uniformly-sampled ROI frames, decoded the SAME
     way the tracker frames are.
 
@@ -520,12 +585,22 @@ def build_roi_backgrounds_uniform(video_path, rois, cfg, fly_masks=None, flags=N
     """
     import numpy as np
     import cv2
-    from .background import fit_gmm_background
 
     if not rois:
         return None
     downscale = int(cfg.roi_downscale)
     n_samples = int(cfg.gmm_n_samples)
+
+    # Reuse path: crop+scale the frames already decoded for ROI detection instead
+    # of decoding the whole video a second time. Falls through to FFmpeg if no
+    # sample stack was handed in (e.g. a plain tracking run that never built the
+    # full-frame background).
+    if getattr(cfg, "bg_roi_sample", "ffmpeg") == "reuse" and \
+            sample_stack is not None and len(sample_stack):
+        try:
+            return _roi_backgrounds_from_stack(sample_stack, rois, cfg, fly_masks, flags)
+        except Exception:
+            return None
     try:
         cap = cv2.VideoCapture(str(video_path))
         n_total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -564,21 +639,7 @@ def build_roi_backgrounds_uniform(video_path, rois, cfg, fly_masks=None, flags=N
                 if nfr == 0:
                     return None
                 frames = np.frombuffer(raw[:nfr * fbytes], np.uint8).reshape(nfr, scaled, scaled)
-                gmm, thr = fit_gmm_background(
-                    frames, bic_improvement=cfg.gmm_bic_improvement, lowp=cfg.gmm_lowp,
-                    min_std=cfg.gmm_min_std, reg_covar=cfg.gmm_reg_covar,
-                )
-                if fly_masks is not None:   # 2-component pixels (thr not NaN) = fly footprint
-                    fly_masks[name] = np.ascontiguousarray(~np.isnan(thr))
-                if getattr(cfg, "bg_model", "adaptive") == "adaptive":
-                    bg, binfo = model_background(frames, cfg)
-                    if flags is not None:
-                        flags[name] = binfo
-                    out[name] = np.ascontiguousarray(bg)
-                else:                        # legacy: brighter-component GMM + de-ghost
-                    if getattr(cfg, "bg_deghost", False):
-                        gmm = _deghost_background(gmm, frames, cfg)
-                    out[name] = np.ascontiguousarray(gmm)
+                out[name] = _reduce_roi_frames(name, frames, cfg, fly_masks, flags)
             return out
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)

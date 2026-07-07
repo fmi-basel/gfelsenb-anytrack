@@ -595,7 +595,7 @@ def render_overlay(
     cfg,
     out_path: Path,
     max_frames: int = 0,
-    trail_len: int = 30,
+    trail_len: Optional[int] = None,
     show_progress: bool = False,
     pose_df: Optional[pd.DataFrame] = None,
     crop_roi: Optional[str] = None,
@@ -617,8 +617,14 @@ def render_overlay(
 
     Returns ``(path, frames_written)``; ``path`` is None if nothing could be
     written. ``max_frames=0`` renders the whole video.
+
+    ``trail_len`` is the trace length in frames drawn up to the current frame;
+    ``< 0`` draws the full trace from the start (the default). ``None`` falls
+    back to ``cfg.qc_overlay_trace``.
     """
     out_path = Path(out_path)
+    if trail_len is None:
+        trail_len = int(getattr(cfg, "qc_overlay_trace", -1))
     flagged = compute_flags(df, video, cfg)
 
     cap = cv2.VideoCapture(str(video.video_path))
@@ -738,7 +744,7 @@ def render_overlay(
             cv2.line(canvas, (ex, ey - prad - dot), (ex, ey + prad + dot), PORT_COL, th)
         for (rn, _tid), (fr, xs, ys) in trails.items():
             col = colors.get(str(rn), (0, 180, 180))
-            lo = int(np.searchsorted(fr, fidx - trail_len))
+            lo = 0 if trail_len < 0 else int(np.searchsorted(fr, fidx - trail_len))
             hi = int(np.searchsorted(fr, fidx, side="right"))
             if hi - lo >= 2:
                 pts = np.stack([(xs[lo:hi] - ox) * scx, (ys[lo:hi] - oy) * scy], axis=1).astype(np.int32)
@@ -762,7 +768,12 @@ def render_overlay(
         if pose_prep is not None:
             draw_pose(canvas, fidx, pose_prep, lambda X, Y: (tx(X), ty(Y)),
                       thickness=th, radius=pose_radius)
-        cv2.putText(canvas, f"frame {fidx}", (8, 22), F, 0.6, (255, 255, 255), 1)
+        label = f"frame {fidx}"
+        (tw, tht), _ = cv2.getTextSize(label, F, 0.6, 1)
+        ch, cw = canvas.shape[:2]
+        org = (max(2, cw - tw - 8), max(tht + 2, ch - 8))
+        cv2.putText(canvas, label, org, F, 0.6, (0, 0, 0), 3, cv2.LINE_AA)      # outline
+        cv2.putText(canvas, label, org, F, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
 
     # Per-backend frame transforms (ffmpeg gets a pre-filtered frame; cv2 a full
     # frame). Crop = scale source region up to out_size, THEN draw.
@@ -1210,9 +1221,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help="Follow-window size in full-res px (default 256).")
     ap.add_argument("--crop-size", type=int, default=0,
                     help="Output px (square) for a cropped overlay (default from config: 800).")
+    ap.add_argument("--trace", type=int, default=None,
+                    help="Overlay trail length in frames up to the current frame "
+                         "(-1 = full trace from the start; default from config: -1).")
     args = ap.parse_args(argv)
 
     cfg = load_config()
+    if args.trace is not None:
+        cfg.qc_overlay_trace = args.trace
     if args.qc_full:
         cfg.qc_overlay_stride = 1
         cfg.qc_overlay_downscale = 1

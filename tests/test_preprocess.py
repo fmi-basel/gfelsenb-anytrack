@@ -170,6 +170,73 @@ def test_build_roi_backgrounds_uniform_excludes_moving_fly(tmp_path):
     assert m.any()
 
 
+def _synthetic_stack(n=30, h=200, w=200):
+    """(n, h, w) uint8 gray: bright arena (~200) with a dark blob that roams."""
+    stack = np.full((n, h, w), 200, np.uint8)
+    for i in range(n):
+        cv2.circle(stack[i], (50 + (i % 20), 50), 5, 20, -1)
+    return stack
+
+
+def test_roi_backgrounds_reuse_from_stack_no_decode():
+    """The reuse sampler builds per-ROI backgrounds from an in-memory frame stack
+    (no video decode): correct shape, roaming blob excluded, side-channels filled."""
+    cfg = AnyTrackConfig(); cfg.roi_downscale = 2; cfg.gmm_n_samples = 30
+    cfg.bg_roi_sample = "reuse"
+    roi = CircleROI(name="r0", cx=50, cy=50, r=39)
+    _, _, _, scaled = roi_crop_geometry(roi, cfg.roi_downscale)
+    stack = _synthetic_stack()
+
+    fly_masks, flags = {}, {}
+    out = build_roi_backgrounds_uniform("unused_when_reuse.avi", [roi], cfg,
+                                        fly_masks=fly_masks, flags=flags, sample_stack=stack)
+    assert out is not None and set(out) == {"r0"}
+    bg = out["r0"]
+    assert bg.shape == (scaled, scaled) and bg.dtype == np.uint8
+    assert np.median(bg) > 150 and (bg < 100).mean() < 0.05   # blob not baked in
+    assert fly_masks["r0"].shape == (scaled, scaled) and fly_masks["r0"].dtype == np.bool_
+    assert flags["r0"]  # model_background diagnostics recorded
+
+    # Without a fly-mask request the adaptive path skips the GMM fit but still
+    # produces the same background (the GMM output was only feeding the overlay).
+    out2 = build_roi_backgrounds_uniform("unused.avi", [roi], cfg, sample_stack=stack)
+    assert np.array_equal(out2["r0"], bg)
+
+
+def test_roi_backgrounds_reuse_falls_back_without_stack():
+    """reuse mode with no sample stack must not raise — returns None so the caller
+    (or the ffmpeg path) can take over."""
+    cfg = AnyTrackConfig(); cfg.bg_roi_sample = "reuse"
+    roi = CircleROI(name="r0", cx=50, cy=50, r=39)
+    # No stack + a non-existent video → None (ffmpeg path also fails cleanly).
+    assert build_roi_backgrounds_uniform("does_not_exist.avi", [roi], cfg,
+                                         sample_stack=None) is None
+
+
+@pytest.mark.skipif(not check_ffmpeg_available(), reason="ffmpeg not available")
+def test_roi_backgrounds_reuse_matches_ffmpeg(tmp_path):
+    """The reuse sampler and the FFmpeg sampler agree on the per-ROI background
+    (crop-then-scale keeps the scaler/decode mismatch sub-threshold)."""
+    from anytrack.background import sample_frames_uniformly
+    vid = tmp_path / "in.avi"
+    if not _write_video(vid, n=40, h=200, w=200):
+        pytest.skip("no MJPG encoder in this OpenCV build")
+    roi = CircleROI(name="r0", cx=50, cy=50, r=39)
+
+    cfg = AnyTrackConfig(); cfg.roi_downscale = 2; cfg.gmm_n_samples = 30
+    cfg.bg_roi_sample = "ffmpeg"
+    out_ff = build_roi_backgrounds_uniform(vid, [roi], cfg)
+    cfg.bg_roi_sample = "reuse"
+    stack = sample_frames_uniformly(str(vid), cfg.gmm_n_samples)
+    out_re = build_roi_backgrounds_uniform(vid, [roi], cfg, sample_stack=stack)
+
+    assert out_ff is not None and out_re is not None
+    a, b = out_ff["r0"].astype(int), out_re["r0"].astype(int)
+    assert a.shape == b.shape
+    assert np.abs(a - b).mean() < 8.0            # sub-threshold agreement
+    assert (np.abs(a - b) > 15).mean() < 0.02    # <2% of pixels differ past detection thr
+
+
 @pytest.mark.skipif(not check_ffmpeg_available(), reason="ffmpeg not available")
 def test_build_roi_backgrounds_uniform_fallback(tmp_path):
     """Returns None (worker then builds its own GMM) on unreadable input / no ROIs."""

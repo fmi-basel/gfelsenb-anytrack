@@ -75,3 +75,78 @@ def test_render_overlay_crop_roi_dims(tmp_path):
     cap = cv2.VideoCapture(str(p3))
     fw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)); fh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)); cap.release()
     assert (fw, fh) == (160, 160)                        # output size, not the 64px window
+
+
+def _last_frame(path):
+    cap = cv2.VideoCapture(str(path)); fr = None
+    while True:
+        ok, f = cap.read()
+        if not ok:
+            break
+        fr = f
+    cap.release()
+    return fr
+
+
+def test_overlay_trace_length_and_frame_number(tmp_path):
+    """Full trace by default draws the whole path so far; --trace caps it. The
+    frame-number annotation sits in the bottom-right corner."""
+    N, H, W = 24, 200, 200
+    xs = np.linspace(30, 170, N); ys = np.linspace(30, 170, N)   # fly walks the diagonal
+    vp = tmp_path / "mv.avi"
+    wr = cv2.VideoWriter(str(vp), cv2.VideoWriter_fourcc(*"MJPG"), 30.0, (W, H), isColor=True)
+    if not wr.isOpened():
+        wr.release(); pytest.skip("No MJPG encoder available")
+    for i in range(N):
+        g = np.full((H, W), 200, np.uint8)
+        cv2.circle(g, (int(xs[i]), int(ys[i])), 4, 20, -1)
+        wr.write(cv2.cvtColor(g, cv2.COLOR_GRAY2BGR))
+    wr.release()
+    df = pd.DataFrame({"roi": ["r0"] * N, "track_id": [0] * N, "frame": range(N),
+                       "x": xs, "y": ys, "t_s": [i / 30 for i in range(N)], "area": [30.0] * N})
+    video = SimpleNamespace(video_path=vp, width=W, height=H, frame_count=N,
+                            fps_nominal=30.0, rois=[])   # no arena circle → clean probe
+    cfg = AnyTrackConfig(); cfg.qc_overlay_downscale = 1; cfg.qc_overlay_stride = 1
+
+    def early_has_trail(fr):   # an early path point (50,50), on the diagonal
+        patch = fr[45:56, 45:56].astype(int)
+        return int((np.abs(patch - 200) >= 20).any(axis=2).sum()) > 5
+
+    pf, _ = render_overlay(video, df, cfg, tmp_path / "full.mp4", trail_len=-1)
+    ps, _ = render_overlay(video, df, cfg, tmp_path / "short.mp4", trail_len=3)
+    if pf is None or ps is None:
+        pytest.skip("No overlay encoder available")
+    ff = _last_frame(pf); fs = _last_frame(ps)
+    assert early_has_trail(ff)          # full trace reaches the start of the path
+    assert not early_has_trail(fs)      # a 3-frame trace does not
+
+    white = np.all(ff >= 240, axis=2)   # frame-number text
+    yw, xw = np.where(white)
+    assert len(xw) and xw.mean() > W / 2 and yw.mean() > H / 2   # bottom-right quadrant
+
+
+def test_overlay_trace_defaults_to_config(tmp_path):
+    """trail_len=None resolves to cfg.qc_overlay_trace (default -1 = full)."""
+    N, H, W = 16, 160, 160
+    xs = np.linspace(20, 140, N); ys = np.linspace(20, 140, N)
+    vp = tmp_path / "cfg.avi"
+    wr = cv2.VideoWriter(str(vp), cv2.VideoWriter_fourcc(*"MJPG"), 30.0, (W, H), isColor=True)
+    if not wr.isOpened():
+        wr.release(); pytest.skip("No MJPG encoder available")
+    for i in range(N):
+        g = np.full((H, W), 200, np.uint8)
+        cv2.circle(g, (int(xs[i]), int(ys[i])), 3, 20, -1)
+        wr.write(cv2.cvtColor(g, cv2.COLOR_GRAY2BGR))
+    wr.release()
+    df = pd.DataFrame({"roi": ["r0"] * N, "track_id": [0] * N, "frame": range(N),
+                       "x": xs, "y": ys, "t_s": [i / 30 for i in range(N)], "area": [20.0] * N})
+    video = SimpleNamespace(video_path=vp, width=W, height=H, frame_count=N,
+                            fps_nominal=30.0, rois=[])
+    cfg = AnyTrackConfig(); cfg.qc_overlay_downscale = 1; cfg.qc_overlay_stride = 1
+    cfg.qc_overlay_trace = 2                              # config caps the trace
+    p, _ = render_overlay(video, df, cfg, tmp_path / "o.mp4")   # trail_len=None → cfg
+    if p is None:
+        pytest.skip("No overlay encoder available")
+    fr = _last_frame(p)
+    patch = fr[35:46, 35:46].astype(int)                 # early path point (40,40)
+    assert int((np.abs(patch - 200) >= 20).any(axis=2).sum()) <= 5   # not reached by a 2-frame trace

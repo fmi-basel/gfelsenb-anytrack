@@ -83,6 +83,7 @@ class AnyTrackConfig:
     cv_threads_per_worker: int = 1  # OpenCV threads inside each tracking worker (0 = leave default)
     roi_stream_decode: bool = True  # Decode once and pipe raw gray crops to trackers (FIFO); else encode ROI mp4s
     bg_reuse_for_roi: bool = True  # Reuse the (unblurred) full-frame uniform bg per ROI instead of per-worker/first-N GMM (fixes streaming first-100-frame bake-in)
+    bg_roi_sample: str = "ffmpeg"  # How to sample frames for the per-ROI background: "ffmpeg" (decode-once select=mod through the SAME crop→scale filter tracking uses — scaler-consistent) or "reuse" (crop+scale the full-frame samples already decoded for ROI detection — no second decode, ~4x faster; sub-threshold difference vs ffmpeg, 0 inner-arena px over threshold). Falls back to ffmpeg when no sample stack is available.
     bg_deghost: bool = True          # Lift a baked-in fly (very-long-dwell blind spot) to arena brightness via a fixture-safe near-max pass
     bg_deghost_percentile: float = 98  # Per-pixel near-max used to recover the arena where a fly baked in (robust to a fly that leaves >~2% of frames)
     bg_deghost_margin: int = 15      # Only lift pixels this many gray levels darker than their near-max (≈ thr_fixed; ignores clean arena + true dark fixtures)
@@ -169,6 +170,7 @@ class AnyTrackConfig:
     qc_overlay_downscale: int = 2       # downscale factor for the overlay video (1 = full res)
     qc_overlay_crf: int = 23            # libx264 CRF for the overlay video (lower = better/bigger)
     qc_overlay_stride: int = 5          # render every Nth frame in the overlay (1 = every frame)
+    qc_overlay_trace: int = -1          # overlay trail length in frames up to the current frame (-1 = full trace from the start)
     # Hardware H.264 (VideoToolbox) is ~1.8x faster than libx264 only at stride=1;
     # at the default stride=5 libx264 is faster AND ~12x smaller (adaptive CRF vs
     # fixed bitrate), so HW defaults OFF. Turn on for full-framerate overlays.
