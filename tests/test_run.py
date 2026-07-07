@@ -142,6 +142,36 @@ def test_anytrack_run_writes_custom_output(tmp_path, monkeypatch):
     assert df["x"].max() - df["x"].min() > 5  # captured the rightward motion
 
 
+def _fake_ensure_two(v, cfg, background=None):
+    v.rois = [CircleROI(name="r0", cx=25, cy=40, r=20),
+              CircleROI(name="r1", cx=55, cy=40, r=20)]
+    return v
+
+
+def test_anytrack_run_roi_filter(tmp_path, monkeypatch):
+    """--roi restricts the run to the named arena(s); an unknown name fails cleanly."""
+    video = tmp_path / "vid.avi"
+    if not _write_video(video):
+        pytest.skip("No MJPG encoder available")
+    _write_timing(video.with_suffix(".csv"), n=20)
+    monkeypatch.setattr(run_mod, "load_config", _synthetic_cfg)
+    monkeypatch.setattr(run_mod, "ensure_rois", _fake_ensure_two)
+
+    # Restrict to r1: only that arena is tracked and written.
+    out = tmp_path / "o.parquet"
+    rc = run_mod.main(["--video", str(video), "--output", str(out), "--no-fast", "--roi", "r1"])
+    assert rc == 0
+    df = pd.read_parquet(out)
+    assert set(df["roi"].unique()) == {"r1"}
+
+    # Unknown arena → non-zero exit and no output file.
+    out2 = tmp_path / "o2.parquet"
+    rc2 = run_mod.main(["--video", str(video), "--output", str(out2),
+                        "--no-fast", "--roi", "arena_99"])
+    assert rc2 != 0
+    assert not out2.exists()
+
+
 def test_save_roi_backgrounds_writes_bg_and_flymask(tmp_path):
     """_save_roi_backgrounds writes <arena>.png and a red-tinted <arena>_flymask.png."""
     out = tmp_path / "clip_tracks.parquet"

@@ -184,6 +184,22 @@ def _run_one(video_path, idx: int, n: int, *, args, cfg, single, group=None) -> 
         else:
             info("No ROIs detected; nothing to track.")
         return None
+    # Optional per-arena restriction (--roi): keep only the named ROIs so every
+    # downstream stage runs on just them. Applied after detection so names match.
+    wanted = getattr(args, "roi", None)
+    if wanted:
+        have = {r.name for r in video.rois}
+        missing = [n for n in wanted if n not in have]
+        if missing:
+            msg = (f"--roi: unknown arena(s) {', '.join(missing)}; "
+                   f"detected: {', '.join(sorted(have))}")
+            if bp is not None:
+                bp.finish(msg, ok=False)
+            else:
+                info(msg)
+            return None
+        keep = set(wanted)
+        video.rois = [r for r in video.rois if r.name in keep]
     if not batch:
         ok(f"{len(video.rois)} ROI(s): {', '.join(r.name for r in video.rois)}")
 
@@ -373,6 +389,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help="Track every Nth frame and interpolate the rest (streaming path; overrides config).")
     ap.add_argument("--workers", type=int, default=None,
                     help="Parallel tracking workers for fast mode (overrides config).")
+    ap.add_argument("--roi", action="append", default=None, metavar="NAME",
+                    help="Restrict the run to these arena(s) by name (e.g. --roi arena_04). "
+                         "Repeatable or comma-separated. Applied after ROI detection, so "
+                         "background modelling, tracking, refine, QC and crops all run on "
+                         "just the selected arena(s). Default: all detected arenas.")
     ap.add_argument("--qc", action="store_true",
                     help="Also write QC artifacts (overlay/plots/flags/summary).")
     ap.add_argument("--qc-full", "--qc_full", dest="qc_full", action="store_true",
@@ -436,6 +457,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--pose-every-n", type=int, default=None,
                     help="Run pose on every Nth tracked frame (default from config: 1).")
     args = ap.parse_args(argv)
+
+    if args.roi:   # flatten repeated + comma-separated names, preserving order, de-duped
+        seen, names = set(), []
+        for token in args.roi:
+            for n in str(token).split(","):
+                n = n.strip()
+                if n and n not in seen:
+                    seen.add(n); names.append(n)
+        args.roi = names or None
 
     cfg = load_config()
     if args.fast is not None:
