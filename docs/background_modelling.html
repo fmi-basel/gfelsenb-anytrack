@@ -182,33 +182,37 @@
   they also trip the QC edge-pinned / low-activity flags.</p>
 
   <h2>Attempted — can we <i>recover</i> a never-moved fly instead of flagging it?</h2>
-  <p>Two ideas were tried to salvage the 3 stuck arenas rather than just flag them:</p>
+  <p>Whether a baked-in fly can be salvaged rather than flagged, revisited after adding
+  <b>odor-port detection</b> (which reliably locates the central port — see
+  <code>odor_port.py</code>):</p>
   <ul>
     <li><b>GMM.</b> No — a fly dark in ~every frame is a <i>one</i>-component (dark) GMM at
-      its pixel; there is no second (floor) mode to prefer, so the fly is the mode and bakes
-      straight in.</li>
-    <li><b>Spatial fill from surrounding non-fly pixels</b> (slowly diffuse the surrounding
-      floor into the baked blob — <code>fill_stationary</code>, tier T3). The floor <i>is</i>
-      observed spatially even though it is never observed <i>temporally</i> at the fly's pixel
-      (p50=p90=p98=max there), so this is the only thing that could work. It does not, for two
-      compounding reasons on this rig:
-      <ol>
-        <li>The truly-stuck fly sits at the <b>arena wall</b>, only ~44 gray levels below the
-          floor and inside the already-dim vignette periphery — so it has <b>no local contrast</b>
-          and is not detected as a dark spot to fill in the first place.</li>
-        <li>The one compact local dark spot that <i>is</i> detected is the <b>central rig port</b>
-          (identical ~276&thinsp;px in every arena). Filling it turns a legitimate background
-          fixture into a <b>false candidate in every frame</b> — multi-candidate rate jumps toward
-          100% across otherwise-clean arenas. (An apparent "coverage 6%→100%" recovery was an
-          artifact: coverage was counting the filled port as a detection, not the real fly.)</li>
-      </ol>
-      So <code>fill_stationary</code> ships as an opt-in (<code>bg_model_fill_stationary</code>,
-      default OFF); it is not a fix for these cases.</li>
+      its pixel; there is no second (floor) mode to prefer, so the fly is the mode and bakes in.</li>
+    <li><b>Naive spatial fill</b> (fill every compact local dark spot). Fails: the only compact
+      dark spot is the <b>central port</b> (~276&thinsp;px in every arena), so it fills the port →
+      a false candidate every frame (multi-candidate → ~100%), and the earlier "coverage 6%→100%"
+      was an artifact (counting the filled port, not the fly).</li>
+    <li><b>Fill the fly, spare the port</b> (<code>refine_stuck_background</code>, opt-in two-pass
+      <code>--refine-stuck</code>). With the port now detectable (excluded from the fill) and a
+      coverage gate (only run where a fly is actually stuck), a <b>fly mask</b> — from
+      Segment-Anything's <code>segment_fly</code>, or the dark connected component when the fly is
+      compact — is diffused in from the surrounding floor. <b>Concept-validated with an oracle fly
+      mask</b>: coverage 6–17% → 100% with <b>95–98% of detections at the fly</b> (not the port).
+      So a baked-in stationary fly <i>is</i> recoverable in principle — my earlier "impossible
+      spatially" verdict was too absolute.</li>
   </ul>
-  <p><b>Conclusion:</b> a genuinely never-moved fly is not recoverable by background modelling —
-  temporally (floor never observed at its pixel) or spatially (no local contrast to detect it; the
-  only fillable spot is a fixture). It is correctly handled by <b>flagging</b> via its tracking
-  outcome (coverage), exactly as the goal anticipated.</p>
+  <p><b>But on 2025-12-11 it doesn't apply</b>, for an instructive reason: the <i>production</i>
+  per-ROI background for the flagged arena already yields <b>100% sample-detection</b> (it does not
+  bake the fly). Its low <i>tracked-frame</i> coverage (~54%) is a <b>linking</b> problem — the
+  tracked positions scatter across the whole arena (std ≈157&thinsp;px) as the tracker chases
+  spurious candidates — not a baked-fly problem, so <code>refine_stuck</code> correctly finds
+  nothing to fill. That residual is a tracking/candidate-disambiguation issue, out of scope for
+  background modelling.</p>
+  <p><b>Conclusion:</b> a baked-in stationary fly is recoverable (fill-fly-spare-port, oracle-
+  validated) and shipped as opt-in <code>--refine-stuck</code>; a <i>perfectly</i> never-moved fly
+  with no baked-in background signature is still best handled by <b>flagging</b> via its tracking
+  outcome. Port detection is the enabling piece for both — and a feature in its own right
+  (fly-to-port distance, the local-search readout).</p>
 
   <h2>How to optimize background modelling — recommendations</h2>
   <ol>

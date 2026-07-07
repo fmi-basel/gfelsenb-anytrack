@@ -93,6 +93,10 @@ class AnyTrackConfig:
     bg_model_fill_min_area: int = 15    # Min connected area (scaled px) of a local dark spot to treat as a stuck fly to fill
     bg_model_fill_max_area: int = 4000  # Max connected area (scaled px) — larger dark regions aren't a fly, left alone
     bg_model_fill_exclude_center: float = 0.0  # Spare a central disk of this radius-fraction from stationary fill (>0 protects a central rig port); 0 = fill everywhere
+    bg_refine_stuck: bool = False       # Two-pass repair (opt-in): after tracking, re-model + re-track arenas whose fly baked in (coverage collapsed), filling the fly from surrounding floor while sparing the detected odor port
+    bg_refine_stuck_cov: float = 0.8    # An arena is "stuck" (triggers refine) if its first-pass tracked-frame coverage (rows/frames) is below this
+    bg_refine_fly_radius: int = 13      # Radius (scaled px) of the fallback fly disk when the dark component merges into the rim / no SAM mask
+    bg_refine_fly_max_area: int = 4000  # Above this the dark component is the dim rim, not a fly → use the bounded disk instead
     qc_edge_pinned_frac: float = 0.9   # QC: flag a ROI edge-pinned if the fly is in the outer arena (r>0.85R) this fraction of frames
     qc_low_activity_mm_s: float = 0.05 # QC: flag a ROI low-activity if mean speed is below this (mm/s)
     use_hw_decode: bool = True      # Try hardware-accelerated FFmpeg decode (probed; silent SW fallback if unsupported)

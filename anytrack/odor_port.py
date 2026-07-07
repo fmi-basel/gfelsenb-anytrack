@@ -170,6 +170,25 @@ class SamPortDetector:
         r = float(np.sqrt(best.sum() / np.pi))
         return float(xs.mean()), float(ys.mean()), r, float(np.clip(best_score, 0, 1)), best
 
+    def segment_fly(self, roi_gray, seed):
+        """Refine a fly mask around a seed point (crop-local px) — used by the two-pass
+        stuck-fly repair to get a contrast-independent mask where the classical detector
+        can't see a low-contrast wall fly. Returns a bool mask or None."""
+        import cv2
+        import numpy as np
+        self._predictor.set_image(cv2.cvtColor(roi_gray, cv2.COLOR_GRAY2RGB))
+        masks, scores, _ = self._predictor.predict(
+            point_coords=np.array([[float(seed[0]), float(seed[1])]], dtype=np.float32),
+            point_labels=np.array([1]), multimask_output=True)
+        # smallest plausible (fly-sized) mask containing the seed
+        best = None
+        for m in masks[np.argsort(scores)[::-1]]:
+            a = int(m.sum())
+            if 20 <= a <= 4000 and bool(m[int(seed[1]), int(seed[0])]):
+                best = m.astype(bool)
+                break
+        return best
+
 
 def build_segment_engine(cfg) -> SegmentEngine:
     """Resolve the configured port segmenter, falling back to the classical detector

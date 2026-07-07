@@ -345,6 +345,7 @@ def plot_kinematics(df: pd.DataFrame, cfg, out_dir: Path) -> List[Path]:
         ("speed_mm_s", "speed (mm/s)"),
         ("ang_speed_deg_s", "angular speed\n(deg/s)"),
         ("r_center_mm", "dist. from\ncenter (mm)"),
+        ("dist_to_port_mm", "dist. to\nodor port (mm)"),   # present only with --detect-port
     ]
     present = [(c, lbl) for c, lbl in metrics if c in df.columns]
     if not present:
@@ -601,11 +602,15 @@ def render_overlay(
     follow: Optional[str] = None,
     follow_size: int = 256,
     crop_output_size: int = 0,
+    ports: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Optional[Path], int]:
     """Burn tracking annotations onto the source video.
 
     Draws ROI circles + name labels, a fading trail per track, and a centroid
-    dot (ROI-colored) with a red ring on flagged frames. The video is written
+    dot (ROI-colored) with a red ring on flagged frames. When ``ports`` (a
+    ``{roi: PortDetection}`` map) is given, each odor port is marked with a
+    magenta crosshair and a thin line + live distance from the tracked fly to it.
+    The video is written
     **downscaled** (``cfg.qc_overlay_downscale``) and, when FFmpeg is available,
     decoded and H.264-encoded through FFmpeg pipes — far faster and far smaller
     than full-res cv2 ``mp4v``. Falls back to cv2 if FFmpeg is missing.
@@ -645,6 +650,10 @@ def render_overlay(
     # output size *before* drawing, so the skeleton/labels stay crisp.
     rois_full = [(str(r.name), float(r.cx), float(r.cy), float(r.r),
                   colors.get(str(r.name), (90, 90, 90))) for r in rois]
+    # Odor ports (full-res): {roi: (cx, cy, r)}; drawn as a magenta crosshair.
+    ports_full = {str(n): (float(p.cx), float(p.cy), float(p.r))
+                  for n, p in (ports or {}).items()}
+    PORT_COL = (255, 0, 255)
     frame_groups = {int(f): g for f, g in flagged.groupby("frame")}
     trails: Dict[Any, Tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
     for (rn, tid), g in flagged.groupby(["roi", "track_id"]):
@@ -721,6 +730,12 @@ def render_overlay(
         for (nm, cx, cy, rr, col) in rois_full:
             cv2.circle(canvas, (tx(cx), ty(cy)), max(1, int(rr * scx)), col, th)
             cv2.putText(canvas, nm, (tx(cx - rr), ty(cy - rr) - 4), F, 0.5, col, 1, cv2.LINE_AA)
+        for (nm, (px, py, pr)) in ports_full.items():
+            ex, ey = tx(px), ty(py)
+            prad = max(3, int(pr * scx))
+            cv2.circle(canvas, (ex, ey), prad, PORT_COL, th)
+            cv2.line(canvas, (ex - prad - dot, ey), (ex + prad + dot, ey), PORT_COL, th)
+            cv2.line(canvas, (ex, ey - prad - dot), (ex, ey + prad + dot), PORT_COL, th)
         for (rn, _tid), (fr, xs, ys) in trails.items():
             col = colors.get(str(rn), (0, 180, 180))
             lo = int(np.searchsorted(fr, fidx - trail_len))
@@ -733,6 +748,14 @@ def render_overlay(
             for _, r in rows.iterrows():
                 col = colors.get(str(r["roi"]), (0, 255, 0))
                 cx, cy = tx(r["x"]), ty(r["y"])
+                port = ports_full.get(str(r["roi"]))
+                if port is not None:                       # fly → odor-port line + distance
+                    px, py, _pr = port
+                    cv2.line(canvas, (cx, cy), (tx(px), ty(py)), PORT_COL, max(1, th - 1))
+                    dmm = r.get("dist_to_port_mm", np.nan)
+                    if dmm == dmm:                         # not NaN
+                        cv2.putText(canvas, f"{dmm:.0f}mm", (cx + dot + 2, cy - 2),
+                                    F, 0.45 * mag, PORT_COL, 1, cv2.LINE_AA)
                 cv2.circle(canvas, (cx, cy), dot, col, -1)
                 if any(bool(r.get(c, False)) for c in FLAG_COLUMNS):
                     cv2.circle(canvas, (cx, cy), ring, (0, 0, 255), th)
@@ -959,6 +982,7 @@ def run_qc(
     follow: Optional[str] = None,
     follow_size: int = 256,
     crop_output_size: int = 0,
+    ports: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Produce all QC artifacts into ``out_dir`` and return a manifest dict.
 
@@ -1025,7 +1049,7 @@ def run_qc(
             video, df, cfg, out_dir / "qc_overlay.mp4",
             max_frames=max_frames, show_progress=show_progress, pose_df=pose_df,
             crop_roi=crop_roi, follow=follow, follow_size=follow_size,
-            crop_output_size=crop_output_size,
+            crop_output_size=crop_output_size, ports=ports,
         )
 
     def _first(paths):

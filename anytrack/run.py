@@ -237,6 +237,33 @@ def _run_one(video_path, idx: int, n: int, *, args, cfg, single, group=None) -> 
         progress.close()
     dt = time.perf_counter() - t0
 
+    # Two-pass stuck-fly repair (opt-in): arenas whose fly baked in have collapsed
+    # coverage → re-model their background (fill the fly, spare the port) and re-track.
+    if getattr(cfg, "bg_refine_stuck", False) and roi_bgs and not df.empty and video.rois:
+        n = float(getattr(video, "frame_count", 0) or df["frame"].max() + 1)
+        # Coverage = fraction of frames the tracker actually detected the fly. The
+        # streaming tracker drops undetected frames (no NaN row), so a baked-in fly
+        # shows up as far fewer rows than frames.
+        cov = {name: len(g) / max(1.0, n) for name, g in df.groupby("roi")}
+        thr = float(getattr(cfg, "bg_refine_stuck_cov", 0.8))
+        stuck = [r for r in video.rois if r.name in roi_bgs and cov.get(r.name, 1.0) < thr]
+        if stuck:
+            from .preprocess import refine_stuck_background, roi_crop_geometry
+            scale = float(cfg.roi_downscale)
+            for roi in stuck:
+                _cs, x0, y0, _sc = roi_crop_geometry(roi, cfg.roi_downscale)
+                port = ports.get(roi.name)
+                pxy = ((port.cx - x0) / scale, (port.cy - y0) / scale) if port else None
+                pr = (port.r / scale) if port else 0.0
+                roi_bgs[roi.name], _, _ = refine_stuck_background(roi_bgs[roi.name], cfg, pxy, pr)
+            if not batch:
+                step(f"Stuck-fly repair: re-tracking {', '.join(r.name for r in stuck)} …")
+            df = TrackingSession(cfg=cfg, video=video).run(roi_backgrounds=roi_bgs)
+            if not batch:
+                cov2 = {name: len(g) / max(1.0, n) for name, g in df.groupby("roi")}
+                ok("repaired coverage: " + ", ".join(
+                    f"{r.name} {cov.get(r.name,0)*100:.0f}%→{cov2.get(r.name,0)*100:.0f}%" for r in stuck))
+
     out = _resolve_output_path(args.output, cfg, video)
     fmt = "csv" if out.suffix.lower() == ".csv" else None
     if ports:                       # add fly-to-port distance + write a port sidecar
@@ -284,7 +311,7 @@ def _run_one(video_path, idx: int, n: int, *, args, cfg, single, group=None) -> 
                      max_frames=args.qc_max_frames, show_progress=not batch,
                      background=bg_img, pose_df=getattr(session, "pose_dataframe", None),
                      crop_roi=args.crop_roi, follow=args.follow, follow_size=args.follow_size,
-                     crop_output_size=args.crop_size)
+                     crop_output_size=args.crop_size, ports=ports or None)
         if not batch:
             ok(f"QC → {qc_dir}" + (f" (overlay {res['overlay_frames']} frames)"
                                    if res.get("overlay_path") else " (overlay skipped)"))
@@ -369,6 +396,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help="Detect the central odor port per arena (on the model background) "
                          "and add dist_to_port_px/mm to the tracks + a <stem>_ports.json "
                          "sidecar. Backend from cfg.port_backend (classical | sam).")
+    ap.add_argument("--refine-stuck", "--refine_stuck", dest="refine_stuck", action="store_true",
+                    help="Two-pass repair: after tracking, re-model + re-track arenas whose fly "
+                         "baked into the background (coverage collapsed), filling the fly from "
+                         "surrounding floor while sparing the odor port. Implies --detect-port.")
     ap.add_argument("--bg-only", "--bg_only", dest="bg_only", action="store_true",
                     help="Only run background modelling: build the model + per-ROI "
                          "backgrounds, save them (implies --save-roi-bg, plus the "
@@ -407,6 +438,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         cfg.pose_enabled = True
     if getattr(args, "detect_port", False):
         cfg.port_detect_enabled = True
+    if getattr(args, "refine_stuck", False):
+        cfg.bg_refine_stuck = True
+        cfg.port_detect_enabled = True   # need the port location to spare it during fill
     if args.pose_device is not None:
         cfg.pose_device = args.pose_device
     if args.pose_every_n is not None:

@@ -7,7 +7,8 @@ import pytest
 
 from anytrack.preprocess import (extract_roi_videos, check_ffmpeg_available,
                                  cleanup_roi_videos, build_roi_backgrounds_uniform,
-                                 roi_crop_geometry, model_background, _arena_mask)
+                                 roi_crop_geometry, model_background, _arena_mask,
+                                 refine_stuck_background)
 from anytrack.models import CircleROI
 from anytrack.config import AnyTrackConfig
 
@@ -54,6 +55,31 @@ def test_model_background_default_leaves_never_moved_fly_baked():
     bg, info = model_background(stack, _cfg_adaptive())
     assert info["n_stationary_filled"] == 0             # T3 is opt-in
     assert bg[50, 50] < 80                               # fly remains baked
+
+
+def test_refine_stuck_background_fills_fly_spares_port():
+    """The two-pass repair fills a baked-in wall fly from surrounding floor while
+    leaving the (spared) central port dark."""
+    sc = 200
+    bg = np.full((sc, sc), 150, np.uint8)                 # arena floor
+    cv2.circle(bg, (100, 100), 9, 40, -1)                 # central port (spare it)
+    cv2.circle(bg, (100, 178), 11, 60, -1)                # baked wall fly (fill it)
+    port_xy, port_r = (100, 100), 9.0
+    out, fly_xy, n = refine_stuck_background(bg, _cfg_adaptive(), port_xy=port_xy, port_r=port_r)
+    assert n > 0 and fly_xy is not None
+    assert out[178, 100] > 120          # wall fly filled to ~floor
+    assert out[100, 100] < 80           # central port preserved
+    assert 60 <= fly_xy[1] <= 200 and abs(fly_xy[0] - 100) < 20   # found the wall fly, not the port
+
+
+def test_refine_stuck_background_uses_given_fly_mask():
+    """A supplied fly mask (as SAM's segment_fly would give) is filled directly."""
+    sc = 200
+    bg = np.full((sc, sc), 150, np.uint8)
+    cv2.circle(bg, (60, 60), 10, 50, -1)
+    mask = np.zeros((sc, sc), bool); mask[50:71, 50:71] = True
+    out, fly_xy, n = refine_stuck_background(bg, _cfg_adaptive(), fly_mask=mask)
+    assert n > 0 and out[60, 60] > 120
 
 
 def test_fill_stationary_opt_in_fills_a_compact_dark_spot():

@@ -162,6 +162,28 @@ def test_run_qc_writes_artifacts(tmp_path):
         assert 0 < res["overlay_frames"] <= 5
 
 
+def test_run_qc_with_ports_draws_and_plots(tmp_path):
+    """Passing a ports map + dist_to_port_mm renders the overlay and a kinematics
+    distance panel without error."""
+    from anytrack.odor_port import PortDetection
+    video_path = tmp_path / "vid.avi"
+    if not _write_video(video_path):
+        pytest.skip("No MJPG encoder available")
+
+    video = _video(w=64, h=64, n=10, path=video_path,
+                   rois=[CircleROI(name="r0", cx=32, cy=32, r=31)])
+    cfg = AnyTrackConfig(crop_size=16)
+    df = _tracks_df(10)
+    df["dist_to_port_mm"] = np.linspace(0, 5, 10)
+    ports = {"r0": PortDetection(roi="r0", cx=32.0, cy=32.0, r=4.0, conf=0.9, backend="classical")}
+
+    res = run_qc(video, df, cfg, tmp_path / "qc", overlay=True, max_frames=5,
+                 show_progress=False, ports=ports)
+    assert (tmp_path / "qc" / "qc_kinematics.png").exists()   # distance panel present
+    if res["overlay_path"] is not None:
+        assert res["overlay_path"].exists()
+
+
 def test_plot_timeseries_all_ellipse_props(tmp_path):
     n = 12
     df = pd.DataFrame({

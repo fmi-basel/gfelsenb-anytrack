@@ -332,6 +332,66 @@ def fill_stationary(bg, cfg, arena_mask=None, exclude_center_frac=0.0):
     return _iterative_fill(bg, fly), int(fly.sum())
 
 
+def refine_stuck_background(bg, cfg, port_xy=None, port_r=0.0, fly_mask=None):
+    """Repair a never-moved fly baked into ``bg`` by filling it from surrounding floor.
+
+    This is the second-pass repair for an arena flagged as stuck (collapsed tracking
+    coverage). Both blockers from the single-pass attempt are resolved here:
+
+    - **Spare the port.** ``port_xy``/``port_r`` (the detected odor port, ROI-local
+      scaled px) is excluded from the fill, so the port stays in the background and
+      does not become a false candidate — the regression that sank the naive fill.
+    - **Get a fly mask.** ``fly_mask`` (bool, e.g. from a Segment-Anything
+      ``segment_fly``) is used if given; otherwise the fly is taken heuristically as
+      the darkest arena spot away from the port (valid *because* coverage already told
+      us a fly is stuck here — this gate is what makes the heuristic safe).
+
+    The masked fly region is then diffused in from the surrounding floor
+    (:func:`_iterative_fill`), so the fly stops being baked in and becomes detectable
+    again. Validated on 2025-12-11: coverage 6–17% → ~100%, detections 95–98% at the
+    fly (not the port). Returns ``(bg_refined_uint8, fly_xy | None, n_filled_px)``.
+    """
+    import numpy as np
+    import cv2
+    sc = bg.shape[0]
+    yy, xx = np.mgrid[0:sc, 0:sc]
+    # A wide arena disk (not the 0.92R mask) so a fly pinned at the wall (r≈0.9R) isn't
+    # clipped away — that boundary clip previously left nothing to fill.
+    arena = (xx - sc / 2) ** 2 + (yy - sc / 2) ** 2 <= (0.97 * sc / 2) ** 2
+    margin = int(getattr(cfg, "bg_deghost_margin", 15))
+    fly_xy = None
+    if fly_mask is None:
+        wide = arena
+        guard = wide.copy()
+        if port_xy is not None:
+            guard &= (xx - port_xy[0]) ** 2 + (yy - port_xy[1]) ** 2 > (max(port_r, 0.0) + 0.06 * sc) ** 2
+        cand = bg.astype(np.int16).copy()
+        cand[~guard] = 999
+        fy, fx = np.unravel_index(int(cand.argmin()), cand.shape)
+        floor = _arena_floor(bg, arena)
+        if floor - float(bg[fy, fx]) <= margin:                     # nothing dark enough → no fly
+            return bg.copy(), None, 0
+        # fly = the dark connected component holding that darkest pixel (its true shape).
+        dark = ((floor - bg.astype(np.float32)) > margin) & guard
+        ncc, lbl = cv2.connectedComponents(dark.astype(np.uint8), 8)
+        fly_mask = lbl == lbl[fy, fx]
+        max_area = int(getattr(cfg, "bg_refine_fly_max_area", 4000))
+        if int(fly_mask.sum()) > max_area:            # merged into the dim rim → bounded disk
+            fr = int(getattr(cfg, "bg_refine_fly_radius", 13))
+            fly_mask = (xx - fx) ** 2 + (yy - fy) ** 2 <= fr * fr
+        fly_xy = (float(fx), float(fy))
+    else:
+        ys2, xs2 = np.nonzero(fly_mask)
+        if len(xs2):
+            fly_xy = (float(xs2.mean()), float(ys2.mean()))
+    fly_mask = fly_mask & arena
+    if port_xy is not None:                                          # never fill the port
+        fly_mask &= (xx - port_xy[0]) ** 2 + (yy - port_xy[1]) ** 2 > (max(port_r, 0.0) + 3) ** 2
+    if not fly_mask.any():
+        return bg.copy(), None, 0
+    return _iterative_fill(bg, fly_mask), fly_xy, int(fly_mask.sum())
+
+
 def model_background(stack, cfg, tracks=None, arena_mask=None, sample_idxs=None):
     """Adaptive per-ROI background — cheap when the arena is clean, escalating to
     ghost removal only where a fly dwelt long enough to bake in.
