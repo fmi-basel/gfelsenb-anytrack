@@ -21,6 +21,7 @@ dependencies = [
 [project.scripts]
 anytrack = "anytrack.cli:main"
 anytrack-run = "anytrack.run:main"
+anytrack-validate = "anytrack.validate:main"
 anytrack-bg = "anytrack.cli:bg_main"
 anytrack-roi = "anytrack.cli:roi_main"
 anytrack-bench = "anytrack.benchmark:main"
