@@ -124,6 +124,17 @@ def _save_frame_diff(video_path, dst_dir, stem, *, batch) -> Optional["Path"]:
     return path
 
 
+def _stage_brackets(stage_s: dict) -> str:
+    """Render ``(bg 12s · track 55s · qc 16s)`` from a ``{stage: seconds}`` dict.
+
+    Stages are shown in pipeline order; any that didn't run (absent / zero) are
+    omitted. Returns ``""`` when nothing was timed.
+    """
+    order = (("bg", "bg"), ("track", "track"), ("qc", "qc"), ("crops", "crops"))
+    parts = [f"{label} {_fmt_dt(stage_s[key])}" for key, label in order if stage_s.get(key)]
+    return f" ({' · '.join(parts)})" if parts else ""
+
+
 def _run_one(video_path, idx: int, n: int, *, args, cfg, single, group=None) -> Optional[int]:
     """Run the full pipeline on one video; return its tracked row count (or None).
 
@@ -152,6 +163,8 @@ def _run_one(video_path, idx: int, n: int, *, args, cfg, single, group=None) -> 
             info(f"skip {Path(video_path).name}: timing CSV not found ({timing})")
         return None
     video = load_video_asset(Path(video_path), Path(timing))
+    t_video = time.perf_counter()   # whole-video wall clock (bg + track + qc + …)
+    stage_s: dict = {}              # per-stage seconds, shown broken out in the finish line
     # One progress sink for the whole video: the animated line in batch mode,
     # tqdm bars in single mode. Shared across ROI detection → track → pose so
     # each stage draws a frame-based bar.
@@ -251,19 +264,22 @@ def _run_one(video_path, idx: int, n: int, *, args, cfg, single, group=None) -> 
             import json
             (dst / f"{out.stem}_ports.json").write_text(
                 json.dumps({n: p.as_dict() for n, p in ports.items()}, indent=1))
+        total = time.perf_counter() - t_video
         if bp is not None:
-            bp.finish(f"{len(video.rois)} ROIs · backgrounds only")
+            bp.finish(f"{len(video.rois)} ROIs · backgrounds only · {_fmt_dt(total)}")
         elif not batch:
-            ok(f"background-only run · {len(video.rois)} ROI(s)"
+            ok(f"background-only run · {len(video.rois)} ROI(s) · {_fmt_dt(total)}"
                + (f" → {bg_dir}" if bg_dir else " (no per-ROI backgrounds saved)"))
         return len(video.rois)
 
     t0 = time.perf_counter()
+    stage_s["bg"] = t0 - t_video     # background modelling + ROI/port detection (all pre-tracking)
     session = TrackingSession(cfg=cfg, video=video)
     df = session.run(progress_hook=progress, roi_backgrounds=roi_bgs)
     if not batch:
         progress.close()
     dt = time.perf_counter() - t0
+    stage_s["track"] = dt
 
     # Two-pass stuck-fly repair (opt-in): arenas whose fly baked in have collapsed
     # coverage → re-model their background (fill the fly, spare the port) and re-track.
@@ -286,7 +302,9 @@ def _run_one(video_path, idx: int, n: int, *, args, cfg, single, group=None) -> 
                 roi_bgs[roi.name], _, _ = refine_stuck_background(roi_bgs[roi.name], cfg, pxy, pr)
             if not batch:
                 step(f"Stuck-fly repair: re-tracking {', '.join(r.name for r in stuck)} …")
+            _t_rep = time.perf_counter()
             df = TrackingSession(cfg=cfg, video=video).run(roi_backgrounds=roi_bgs)
+            stage_s["track"] += time.perf_counter() - _t_rep
             if not batch:
                 cov2 = {name: len(g) / max(1.0, n) for name, g in df.groupby("roi")}
                 ok("repaired coverage: " + ", ".join(
@@ -335,11 +353,13 @@ def _run_one(video_path, idx: int, n: int, *, args, cfg, single, group=None) -> 
         else:
             step("QC (overlay + plots + flags + summary) …")
         qc_dir = out.parent / f"{out.stem}_qc"
+        _t_qc = time.perf_counter()
         res = run_qc(video, df, cfg, qc_dir, overlay=True,
                      max_frames=args.qc_max_frames, show_progress=not batch,
                      background=bg_img, pose_df=getattr(session, "pose_dataframe", None),
                      crop_roi=args.crop_roi, follow=args.follow, follow_size=args.follow_size,
                      crop_output_size=args.crop_size, ports=ports or None)
+        stage_s["qc"] = time.perf_counter() - _t_qc
         if not batch:
             ok(f"QC → {qc_dir}" + (f" (overlay {res['overlay_frames']} frames)"
                                    if res.get("overlay_path") else " (overlay skipped)"))
@@ -353,12 +373,19 @@ def _run_one(video_path, idx: int, n: int, *, args, cfg, single, group=None) -> 
         else:
             step("Export centroid crops …")
         crops_dir = out.parent / f"{out.stem}_crops"
+        _t_crops = time.perf_counter()
         manifest = export_crops(video, df, cfg, out_dir=crops_dir, show_progress=not batch)
+        stage_s["crops"] = time.perf_counter() - _t_crops
         if not batch:
             ok(f"exported {len(manifest)} crops → {crops_dir}")
 
+    total = time.perf_counter() - t_video
+    summary = (f"{len(video.rois)} ROIs · {len(df)} rows · "
+               f"{_fmt_dt(total)}{_stage_brackets(stage_s)}{pose_note}")
     if bp is not None:
-        bp.finish(f"{len(video.rois)} ROIs · {len(df)} rows · {_fmt_dt(dt)}{pose_note}")
+        bp.finish(summary)
+    elif not batch:
+        ok(f"done · {_fmt_dt(total)}{_stage_brackets(stage_s)}")
     return len(df)
 
 

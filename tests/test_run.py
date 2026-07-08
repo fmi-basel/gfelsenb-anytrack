@@ -153,6 +153,31 @@ def test_batch_concurrency_resolution():
     assert run_mod._batch_concurrency(seq, n_videos=8) == 1      # sequential
 
 
+def test_stage_brackets_orders_and_skips_zero():
+    """_stage_brackets renders bg→track→qc→crops in order, omitting 0/absent stages."""
+    assert run_mod._stage_brackets({}) == ""
+    s = run_mod._stage_brackets({"track": 55.0, "bg": 12.0, "qc": 0.0})
+    assert s == " (bg 12.0s · track 55.0s)"        # bg first, qc dropped (0)
+    s2 = run_mod._stage_brackets({"bg": 1.0, "track": 2.0, "qc": 3.0, "crops": 4.0})
+    assert s2 == " (bg 1.0s · track 2.0s · qc 3.0s · crops 4.0s)"
+
+
+def test_run_prints_total_with_stage_breakdown(tmp_path, monkeypatch, capsys):
+    """A finished run reports the whole-video time plus a per-stage breakdown."""
+    video = tmp_path / "vid.avi"
+    if not _write_video(video):
+        pytest.skip("No MJPG encoder available")
+    _write_timing(video.with_suffix(".csv"), n=20)
+    monkeypatch.setattr(run_mod, "load_config", _synthetic_cfg)
+    monkeypatch.setattr(run_mod, "ensure_rois", _fake_ensure)
+
+    rc = run_mod.main(["--video", str(video), "--output", str(tmp_path / "o.parquet"), "--no-fast"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "done ·" in out                          # total-time line
+    assert "(bg " in out and "track " in out        # stage breakdown in brackets
+
+
 def test_dry_run_processes_nothing(tmp_path, monkeypatch, capsys):
     """--dry-run prints the plan (steps 1-3) and stops: no ROI detect, no output."""
     video = tmp_path / "vid.avi"
