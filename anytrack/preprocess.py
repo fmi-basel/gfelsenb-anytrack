@@ -33,7 +33,11 @@ def _run_ffmpeg_with_progress(
 
     Returns ``(returncode, stderr_text)``.
     """
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    # stdin=DEVNULL so ffmpeg can't grab the controlling TTY and switch it to
+    # non-canonical mode for its interactive 'q' key — which, left unrestored,
+    # breaks the shell (Return stops working until `stty sane`).
+    proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     stderr_chunks: List[str] = []
 
     def _drain() -> None:
@@ -112,7 +116,7 @@ def _probe_codec(video_path) -> Optional[str]:
             [ffprobe, "-v", "error", "-select_streams", "v:0",
              "-show_entries", "stream=codec_name", "-of", "default=np=1:nq=1",
              str(video_path)],
-            capture_output=True, text=True, timeout=30,
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30,
         )
         return (out.stdout or "").strip() or None
     except Exception:
@@ -130,7 +134,7 @@ def _hwaccel_probe_ok(video_path, flags) -> bool:
         r = subprocess.run(
             [get_ffmpeg_path(), "-v", "error", *flags, "-i", str(video_path),
              "-frames:v", "1", "-f", "null", "-"],
-            capture_output=True, text=True, timeout=60,
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60,
         )
         return r.returncode == 0
     except Exception:
@@ -627,7 +631,7 @@ def build_roi_backgrounds_uniform(video_path, rois, cfg, fly_masks=None, flags=N
             cmd = [ffmpeg, "-y", "-nostats", "-i", str(video_path),
                    "-filter_complex", ";".join([split, *filter_parts]),
                    "-vsync", "0", *output_args]
-            proc = subprocess.run(cmd, capture_output=True)
+            proc = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True)
             if proc.returncode != 0:
                 return None
 
@@ -789,6 +793,7 @@ def extract_roi_video(
     try:
         result = subprocess.run(
             cmd,
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=600,  # 10 minute timeout

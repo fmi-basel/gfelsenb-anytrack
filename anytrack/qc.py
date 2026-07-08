@@ -930,7 +930,8 @@ def _overlay_ffmpeg(video_path, out_path, dec_w, dec_h, fps, crf, max_frames, an
                *venc, "-pix_fmt", "yuv420p", str(out_path)]
 
     frame_bytes = dec_w * dec_h * 3
-    dec = subprocess.Popen(dec_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    dec = subprocess.Popen(dec_cmd, stdin=subprocess.DEVNULL,
+                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     enc = subprocess.Popen(enc_cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
                            stderr=subprocess.DEVNULL)
     written = 0

@@ -783,7 +783,10 @@ def track_video_fast_streaming(
     stderr_chunks: List[str] = []
     tracks: List[FlyTrack] = []
     try:
-        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        # stdin=DEVNULL so the ffmpeg decode can't put the terminal into raw mode
+        # (its interactive 'q' handler), which would leave the shell needing `stty sane`.
+        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
 
         def _drain():
             try:
