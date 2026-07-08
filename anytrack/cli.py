@@ -14,8 +14,14 @@ from .gui import run as run_gui
 from .background import build_background
 
 
-def main():
-    parser = argparse.ArgumentParser(prog="anytrack")
+def gui_main():
+    """Entry point for `anytrack-gui` (and `anytrack gui`): launch the Tk GUI.
+
+    This was formerly the bare `anytrack` command; `anytrack` is now a
+    subcommand dispatcher (see anytrack.dispatch) and no longer starts the GUI
+    by default.
+    """
+    parser = argparse.ArgumentParser(prog="anytrack-gui")
     parser.add_argument("--nogui", action="store_true", help="Do not start GUI (placeholder).")
     parser.add_argument(
         "--fast",

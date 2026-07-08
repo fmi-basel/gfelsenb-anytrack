@@ -153,6 +153,30 @@ def test_batch_concurrency_resolution():
     assert run_mod._batch_concurrency(seq, n_videos=8) == 1      # sequential
 
 
+def test_dry_run_processes_nothing(tmp_path, monkeypatch, capsys):
+    """--dry-run prints the plan (steps 1-3) and stops: no ROI detect, no output."""
+    video = tmp_path / "vid.avi"
+    if not _write_video(video):
+        pytest.skip("No MJPG encoder available")
+    _write_timing(video.with_suffix(".csv"), n=20)
+    monkeypatch.setattr(run_mod, "load_config", _synthetic_cfg)
+
+    def _boom(*a, **k):   # a dry run must never reach per-video processing
+        raise AssertionError("dry run must not detect ROIs or process the video")
+    monkeypatch.setattr(run_mod, "ensure_rois", _boom)
+
+    out = tmp_path / "o.parquet"
+    rc = run_mod.main(["--video", str(video), "--output", str(out),
+                       "--no-fast", "--qc", "--dry-run"])
+    assert rc == 0
+    assert not out.exists()                              # nothing written
+    assert not (out.parent / f"{out.stem}_qc").exists()  # QC not run either
+    txt = capsys.readouterr().out
+    assert "dry run" in txt
+    assert "track · write · QC" in txt                   # enabled stages listed
+    assert "vid.avi" in txt and "vid.csv" in txt         # the (video, timing) pair
+
+
 def test_print_run_config(capsys):
     """_print_run_config prints the file path, a summary, and flags non-defaults."""
     run_mod._print_run_config(AnyTrackConfig())          # all defaults

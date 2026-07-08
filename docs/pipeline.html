@@ -82,6 +82,28 @@
   .node .mod{color:var(--accent); font-size:12.5px}
   .arrow{align-self:center; color:var(--ink-muted); font-size:14px; line-height:1; padding:5px 0}
 
+  /* ---- anytrack-run execution diagram (CLI orchestration) ---- */
+  .runflow{display:flex; flex-direction:column; gap:12px}
+  .phase{border:1px solid var(--border); border-radius:12px; background:var(--panel-2); padding:12px 14px}
+  .phdr{display:flex; align-items:baseline; gap:10px; margin:0 0 10px}
+  .phdr .phname{font-weight:700; font-size:13px}
+  .phdr .phsub{color:var(--accent); font-size:12px}
+  .steps{display:flex; flex-direction:column; gap:8px}
+  .rstep{display:flex; gap:12px; align-items:flex-start; background:var(--surface);
+     border:1px solid var(--border); border-radius:9px; padding:9px 11px}
+  .rstep.opt{border-style:dashed}
+  .rstep .rn{flex:0 0 auto; width:22px; height:22px; border-radius:6px; background:var(--panel-2);
+     color:var(--ink-muted); font-size:12px; font-weight:700; display:grid; place-items:center}
+  .rstep .rbody{flex:1 1 auto; min-width:0}
+  .rstep .rt{font-weight:650; font-size:13.5px}
+  .rstep .rd{color:var(--ink-muted); font-size:12.5px}
+  .rtag{display:inline-block; font-size:11px; font-weight:700; padding:1px 7px; border-radius:999px;
+     border:1px solid var(--accent); color:var(--accent); margin-left:8px; vertical-align:middle}
+  .cut{display:flex; align-items:center; gap:10px; color:var(--warn-ink); font-size:11.5px;
+     font-weight:700; text-transform:uppercase; letter-spacing:.04em; margin:1px 0}
+  .cut::before,.cut::after{content:""; height:0; border-top:2px dashed var(--warn); flex:1}
+  .parrow{align-self:center; color:var(--ink-muted); font-size:14px; text-align:center}
+
   /* ---- tables / checklists ---- */
   table{width:100%; border-collapse:collapse; font-size:13.5px}
   th,td{text-align:left; padding:9px 12px; border-bottom:1px solid var(--border); vertical-align:top}
@@ -118,7 +140,7 @@
   <div class="meta">
     <span>Last updated: <strong id="updated"></strong></span>
     <span id="progressText"></span>
-    <span>Tests: <strong>127 passing</strong> (accuracy/perf need a video)</span>
+    <span>Tests: <strong>183 passing</strong> (accuracy/perf need a video)</span>
     <span><a href="tutorial.html">Tutorial &amp; usage guide →</a></span>
     <span><a href="optimization_planning.html">Performance optimization planning →</a></span>
     <span><a href="streaming_bg_parity.html">Streaming background parity fix →</a></span>
@@ -138,6 +160,14 @@
 
   <h2>Pipeline flow</h2>
   <div class="flow" id="flow"></div>
+
+  <h2>anytrack-run execution</h2>
+  <p class="note">How the <span class="mono">anytrack-run</span> CLI orchestrates the modules above:
+    a per-invocation <strong>setup</strong>, then the <strong>per-video</strong> pipeline, then optional
+    <strong>outputs</strong>. Dashed steps are flag-gated. Two early exits are marked:
+    <span class="mono">--dry-run</span> stops after step&nbsp;3 (report the plan, touch nothing) and
+    <span class="mono">--bg-only</span> stops after the backgrounds.</p>
+  <div class="runflow" id="runflow"></div>
 
   <h2>Module map</h2>
   <table id="moduleTable">
@@ -173,7 +203,7 @@
    SINGLE SOURCE OF TRUTH — update these arrays on every code change.
    status: 'done' | 'partial' | 'planned'
    ===================================================================== */
-const LAST_UPDATED = "2026-07-06";
+const LAST_UPDATED = "2026-07-08";
 
 const STATUS = {
   done:    {label:"Implemented", icon:"✓", cls:"s-done",    node:"done",    color:"var(--good)"},
@@ -210,6 +240,49 @@ const PIPELINE = [
    desc:"Post-hoc QC (A9): background PNG, ROI-colored overlay (arena circles+labels, per-ROI centroids/trails, red flag ring annotated with which flag(s) fired (area/jump/oob/multi/lowC, edge-aware placement; toggle cfg.qc_overlay_flag_labels); frame number burned in the bottom-right corner; trace defaults to the FULL path up to the current frame, capped via --trace/cfg.qc_overlay_trace where -1=full), distributions figure, per-ROI timeseries (area/candidates/contrast/major/minor/angle), kinematics timeseries (speed/ang-speed/dist), occupancy heatmaps, coverage raster, flagged-frame montage, per-frame flags (incl. low-contrast) + JSON summary, background drift-over-time (shown only when bg_drift_correction was on, fed by the A4 BackgroundState via the additive bg_drift column), and a single qc_report.html bundling it all. When ports are given (--detect-port): the overlay marks each odor port (magenta crosshair) + a live fly→port line/distance, and the kinematics figure gains a dist-to-port panel. anytrack-qc CLI."},
 ];
 
+// anytrack-run CLI orchestration (control flow), distinct from the data-flow above.
+// Steps are the ones described in the module docstring / help; opt:true = flag-gated.
+const RUN_FLOW = [
+  {phase:"Setup — once per invocation", sub:"main()", steps:[
+    {n:1, t:"Parse args · load config · apply overrides",
+     d:"load_config() reads the global TOML; CLI flags (--fast, --downscale, --stride, --workers, --concurrency, --roi, pose flags, …) override individual fields."},
+    {n:2, t:"Resolve &amp; validate inputs",
+     d:"resolve_videos(): a single file is used as-is; a directory → discover → validate (openable + timing CSV present) → confirm / checkbox-select. Each video pairs with its &lt;stem&gt;.csv."},
+    {n:3, t:"Print effective config",
+     d:"_print_run_config(): every setting, non-defaults flagged with ← default — the run is self-documenting and silent overrides surface."},
+    {cut:"--dry-run stops here — prints the run plan, loads no frames, writes nothing"},
+    {n:4, t:"Dispatch",
+     d:"one video → _run_one; many → _run_batch (thread pool, K = _batch_concurrency videos at once)."},
+  ]},
+  {phase:"Per video — _run_one()", sub:"mandatory spine + opt-in stages", steps:[
+    {n:5, t:"Load asset",
+     d:"load_video_asset(): probe the video (fps / frames / W×H) and load the timing CSV."},
+    {n:6, t:"Full-frame model background",
+     d:"build_background_image(): per-pixel GMM over sampled frames; feeds ROI detection / QC / ports. 'reuse' sampling keeps the decoded stack for step 9 (no second decode)."},
+    {n:7, t:"ROI (arena) detection", tag:"--roi",
+     d:"ensure_rois() finds the circular arenas on the background; --roi then restricts every downstream stage to the named arena(s)."},
+    {n:8, t:"Odor-port detection", opt:true, tag:"--detect-port",
+     d:"detect_ports(): locate the central port per arena; feeds the fly→port distance columns."},
+    {n:9, t:"Per-ROI background model",
+     d:"build_roi_backgrounds_uniform(): uniformly-sampled GMM + de-ghost per arena, at tracking resolution — this is what tracking subtracts against."},
+    {cut:"--bg-only stops here — saves per-ROI + full-frame backgrounds and the frame diff, no tracking"},
+    {n:10, t:"Tracking",
+     d:"TrackingSession.run(): decode (FFmpeg single-pass / FIFO streaming) → detect (diff → threshold → morph → contours → fitEllipse → area filter → top-N candidates) → link (CentroidTracker: Kalman + greedy NN + acceptance gate + miss re-acquire) → kinematics + additive x_roi/y_roi."},
+    {n:11, t:"Stuck-fly repair", opt:true, tag:"--refine-stuck",
+     d:"Arenas whose fly baked into the background (coverage collapsed) get their background re-modelled and are re-tracked."},
+    {n:12, t:"Write tracks",
+     d:"write_tracks() → parquet/CSV; adds fly→port distance and a &lt;stem&gt;_ports.json sidecar when ports were detected."},
+  ]},
+  {phase:"Optional post-tracking outputs", sub:"flag-gated", steps:[
+    {n:13, t:"Pose", opt:true, tag:"--pose",
+     d:"keypoint inference on centroid crops → &lt;stem&gt;_pose.parquet."},
+    {n:14, t:"QC", opt:true, tag:"--qc",
+     d:"run_qc(): overlay video, distribution / timeseries / kinematics / occupancy plots, failure flags, and a bundled qc_report.html."},
+    {n:15, t:"Crops", opt:true, tag:"--crops",
+     d:"centroid-centered crop export + manifest."},
+  ]},
+];
+
 const MODULES = [
   {mod:"config.py",        resp:"All tunables + TOML persistence. Extended with bg-adaptation / crop / output / staging fields.", status:"done"},
   {mod:"staging.py",       resp:"Copy source video off network to a local scratch disk before processing; device-based skip + cache (NEW).", status:"done"},
@@ -224,7 +297,8 @@ const MODULES = [
   {mod:"tracking.py / tracking_fast.py", resp:"Now thin callers of detector/tracker; legacy cv_angle_deg bug fixed. Batch perf: decode-once FIFO streaming (track_video_fast_streaming — one FFmpeg decode piped as raw gray to N FIFO readers, shared _track_from_frames core, no per-frame cvtColor; falls back to files); cv2.setNumThreads(1) per worker; probed -hwaccel decode.", status:"done"},
   {mod:"preprocess.py",    resp:"FFmpeg ROI extraction — single-pass (decode once, split→4 crops, libx264) + sequential-HW fallback. Adds build_stream_command (decode→gray→N FIFOs), roi_crop_geometry (shared), and probed hw_decode_flags. build_roi_backgrounds_uniform (NEW, default via bg_reuse_for_roi=True) fits each streaming worker's GMM from uniformly-sampled frames run through the SAME split→crop→scale→gray filter as tracking — fixing the first-100-frame bake-in and the cv2/FFmpeg rim scaler mismatch (see streaming_bg_parity.html). Two samplers via bg_roi_sample: 'ffmpeg' (decode-once select=mod, scaler-consistent — default for tracking) or 'reuse' (crop+scale the full-frame samples already decoded for ROI detection — no second decode; MEASURED ~11.8× on the modelling step, bg-only end-to-end 26.1→12.7s, MAE ~1.8 vs ffmpeg with 0 inner-arena px over threshold). --bg-sample auto picks reuse for --bg-only (no tracking → scaler-identical output unneeded), ffmpeg otherwise. Shared _reduce_roi_frames now skips the per-ROI GMM fit in adaptive mode unless the fly-mask overlay is requested (it only fed that overlay) — a free ~1.3s/video on every tracking run.", status:"done"},
   {mod:"session.py",       resp:"Orchestration; x_roi/y_roi columns wired into output (A7). Pose stage pending (B).", status:"partial"},
-  {mod:"run.py",           resp:"Headless full-pipeline CLI: anytrack-run (ROI detect → track → write to --output; --qc/--crops chaining). --video accepts a directory (batch mode via video_select.py: discover→validate→confirm/checkbox-select). Prints the effective config first (config-file path + every setting, non-defaults flagged with ← default) so a run is self-documenting/reproducible and silent overrides like a stale thr_method=&quot;otsu&quot; surface immediately. --roi restricts the run to named arena(s); --concurrency/--jobs sets how many videos run at once in batch (overrides cfg.batch_concurrency; auto = core_budget // workers). Single video → verbose tqdm phase output; batch → animated one-line-per-video progress (braille spinner + per-stage color + ticking elapsed clock, repainted by a daemon thread; the filename column auto-sizes to the batch's longest name, capped to the terminal width, so names aren't clipped) between a banner and an aggregate summary footer. Frame-based bars for every stage via a unified (\"frames\",{stage,n,total}) event: ROI detect (background frame sampling), decode (FFmpeg -progress stream), track (cross-worker Manager frame counter + poller). Via cli_progress.py.", status:"done"},
+  {mod:"run.py",           resp:"Headless full-pipeline CLI: anytrack-run (ROI detect → track → write to --output; --qc/--crops chaining). --video accepts a directory (batch mode via video_select.py: discover→validate→confirm/checkbox-select). Prints the effective config first (config-file path + every setting, non-defaults flagged with ← default) so a run is self-documenting/reproducible and silent overrides like a stale thr_method=&quot;otsu&quot; surface immediately. --roi restricts the run to named arena(s); --concurrency/--jobs sets how many videos run at once in batch (overrides cfg.batch_concurrency; auto = core_budget // workers). --dry-run runs steps 1-3 only (resolve + validate the input(s), print the effective config + the run plan — mode, concurrency, enabled stages, the (video, timing) pairs) and stops before any processing (loads no frames, writes nothing). Single video → verbose tqdm phase output; batch → animated one-line-per-video progress (braille spinner + per-stage color + ticking elapsed clock, repainted by a daemon thread; the filename column auto-sizes to the batch's longest name, capped to the terminal width, so names aren't clipped) between a banner and an aggregate summary footer. Frame-based bars for every stage via a unified (\"frames\",{stage,n,total}) event: ROI detect (background frame sampling), decode (FFmpeg -progress stream), track (cross-worker Manager frame counter + poller). Via cli_progress.py.", status:"done"},
+  {mod:"dispatch.py",      resp:"The anytrack command (NEW): a thin subcommand dispatcher. anytrack &lt;sub&gt; ... routes to the identically-named anytrack-&lt;sub&gt; console script (run/validate/qc/bg/roi/bench/crop-export/label/train/debug/arena-debug/gui), so anytrack run --video X == anytrack-run --video X. Targets are resolved lazily (importlib), so a subcommand imports only its own deps — anytrack run never pulls in the GUI stack. anytrack no longer starts the GUI: it now prints the command list on no-args/--help; the GUI is an explicit anytrack gui (= the new anytrack-gui script → cli.gui_main, formerly the bare anytrack). SUBCOMMANDS is kept in sync with the [project.scripts] entries.", status:"done"},
   {mod:"validate.py",      resp:"anytrack-validate (NEW): preflight input check, run before a (long) tracking run. Per input (video + its &lt;stem&gt;.csv timing) it verifies the video opens and actually decodes (reads frame 0 — metadata can lie; --deep also decodes the last frame to catch truncated files), the timing CSV loads via the pipeline's own io.load_timing_csv (right columns, parseable) with no dt_s&lt;0, and the video-frame-count vs timing-row-count match. --video takes a file or a directory (reuses video_select.discover_videos). PASS/FAIL/WARN per check; WARN (e.g. frame/timing mismatch) is usable by default but fatal under --strict. Exits non-zero if any input fails, so it drops into a batch script / CI gate; --json emits a machine-readable report. Side-effect-free (same 'is this usable?' question run.py answers internally when it discovers a directory).", status:"done"},
   {mod:"odor_port.py",     resp:"Odor-port detection (NEW): SegmentEngine abstraction (ClassicalPortDetector default zero-dep central-dark-spot; SamPortDetector opt-in, lazy torch+SAM, graceful fallback) + detect_odor_port/detect_ports + port_distance/add_port_distance (dist_to_port_px/mm). Wired into run.py via --detect-port.", status:"done"},
   {mod:"gui/app.py",       resp:"Debug window now renders from detector.debug_frame (A7). Pose overlay (B); optional in-GUI crop-export menu deferred (CLI exists).", status:"partial"},
@@ -287,6 +361,23 @@ $("#flow").innerHTML = PIPELINE.map((p,i)=>{
       ${badge(p.status)}
     </div>`;
   return node + (i<PIPELINE.length-1 ? `<div class="arrow">↓</div>` : "");
+}).join("");
+
+// anytrack-run CLI orchestration diagram (grouped phases with early-exit cut markers)
+$("#runflow").innerHTML = RUN_FLOW.map((ph,pi)=>{
+  const steps = ph.steps.map(s=>{
+    if(s.cut) return `<div class="cut">${s.cut}</div>`;
+    const tag = s.tag ? `<span class="rtag mono">${s.tag}</span>` : "";
+    return `<div class="rstep${s.opt?" opt":""}">
+        <div class="rn">${s.n}</div>
+        <div class="rbody"><div class="rt">${s.t}${tag}</div><div class="rd">${s.d}</div></div>
+      </div>`;
+  }).join("");
+  const block = `<div class="phase">
+      <div class="phdr"><span class="phname">${ph.phase}</span><span class="phsub mono">${ph.sub}</span></div>
+      <div class="steps">${steps}</div>
+    </div>`;
+  return block + (pi<RUN_FLOW.length-1 ? `<div class="parrow">↓</div>` : "");
 }).join("");
 
 // module table

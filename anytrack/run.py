@@ -388,6 +388,47 @@ def _print_run_config(cfg) -> None:
         print(f"    {f.name:<{width}} = {val!r}{mark}")
 
 
+def _print_dry_run(videos, cfg, args, single) -> None:
+    """--dry-run: report what a real run would do (steps 1-3) and stop.
+
+    The inputs are already resolved + validated by the time we get here, so this
+    just prints the run plan — mode, batch concurrency, the flag-enabled stages,
+    and the (video, timing) pairs that would be processed — without loading a
+    frame or writing any output. The scope-preview companion to anytrack-validate.
+    """
+    from .cli_progress import header, info, ok
+    header("dry run")
+    n = len(videos)
+    mode = "fast" if cfg.fast_mode else "legacy"
+    if n > 1:
+        info(f"{n} video(s) · {mode} mode · {_batch_concurrency(cfg, n)}× concurrent")
+    else:
+        info(f"1 video · {mode} mode")
+
+    stages = ["track", "write"]
+    if getattr(args, "bg_only", False):
+        stages = ["backgrounds (--bg-only: stop before tracking)"]
+    else:
+        if getattr(cfg, "port_detect_enabled", False):
+            stages.insert(0, "odor-port detection")
+        if getattr(cfg, "bg_refine_stuck", False):
+            stages.append("stuck-fly repair")
+        if getattr(cfg, "pose_enabled", False):
+            stages.append("pose")
+        if args.qc or args.qc_full:
+            stages.append("QC")
+        if getattr(args, "crops", False):
+            stages.append("crops")
+    if getattr(args, "roi", None):
+        stages.append(f"restricted to ROI(s): {', '.join(args.roi)}")
+    info("stages: " + " · ".join(stages))
+
+    for i, v in enumerate(videos, 1):
+        tm = args.timing if (single and args.timing) else Path(v).with_suffix(".csv")
+        info(f"  {i:>2}. {Path(v).name}   (timing: {Path(tm).name})")
+    ok(f"dry run — no processing performed; {n} video(s) would be processed")
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     import argparse
 
@@ -425,6 +466,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                          "Repeatable or comma-separated. Applied after ROI detection, so "
                          "background modelling, tracking, refine, QC and crops all run on "
                          "just the selected arena(s). Default: all detected arenas.")
+    ap.add_argument("--dry-run", "--dry_run", dest="dry_run", action="store_true",
+                    help="Preflight only (steps 1-3): load config, resolve + validate the "
+                         "input(s), then print the effective config and the run plan "
+                         "(which videos, mode, concurrency, enabled stages) and stop. "
+                         "Loads no frames and writes no output.")
     ap.add_argument("--qc", action="store_true",
                     help="Also write QC artifacts (overlay/plots/flags/summary).")
     ap.add_argument("--qc-full", "--qc_full", dest="qc_full", action="store_true",
@@ -564,6 +610,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         ap.error(f"no videos to process for {args.video}")
 
     _print_run_config(cfg)   # print the effective config first (reproducibility)
+
+    if getattr(args, "dry_run", False):   # steps 1-3 only: report the plan, do nothing
+        _print_dry_run(videos, cfg, args, single)
+        return 0
 
     n = len(videos)
     t_all = time.perf_counter()

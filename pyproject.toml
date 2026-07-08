@@ -19,7 +19,8 @@ dependencies = [
 ]
 
 [project.scripts]
-anytrack = "anytrack.cli:main"
+anytrack = "anytrack.dispatch:main"
+anytrack-gui = "anytrack.cli:gui_main"
 anytrack-run = "anytrack.run:main"
 anytrack-validate = "anytrack.validate:main"
 anytrack-bg = "anytrack.cli:bg_main"
