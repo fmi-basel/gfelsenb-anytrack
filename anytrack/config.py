@@ -61,6 +61,11 @@ class AnyTrackConfig:
     detect_max_candidates: int = 5
     expected_fly_area_min: int = 10
     expected_fly_area_max: int = 1500
+    # Restrict detection to the circular arena disk (radius = the detected ROI
+    # radius, centered on the ROI): the background-subtracted image is masked so
+    # no contour/centroid can be detected in the square crop's corners, outside
+    # the arena. On by default; the legacy per-ROI path already did this.
+    detect_arena_mask: bool = True
 
     # Kalman / linking
     max_jump_px: float = 40.0

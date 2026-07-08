@@ -35,7 +35,8 @@ from ..background import (build_background_image, sample_frames_uniformly,
 from ..roi import detect_circular_rois
 from ..preprocess import roi_crop_geometry, deghost, _arena_mask, model_background  # canonical impls (also production)
 from ..detector import (compute_diff, threshold_fg, build_morph_kernels,
-                        _candidates_from_mask, extract_ellipses, centroid_contrast)
+                        _candidates_from_mask, extract_ellipses, centroid_contrast,
+                        inscribed_disk_mask)
 from ..tracker import CentroidTracker
 from ..coordinates import scaled_to_full
 from ..tracking_fast import _rescale_detect_params
@@ -166,6 +167,8 @@ def detect_stages(roi_gray: np.ndarray, bg: np.ndarray, cfg: AnyTrackConfig) -> 
     post-morph mask, and the area-filtered candidates (mirrors detector.py)."""
     kopen, kclose = build_morph_kernels(cfg)
     diff = compute_diff(roi_gray, bg, cfg)
+    if getattr(cfg, "detect_arena_mask", True):         # blank the crop's corners (outside the arena)
+        diff = cv2.bitwise_and(diff, diff, mask=inscribed_disk_mask(roi_gray.shape[:2]))
     thr = threshold_fg(diff, cfg)                       # pre-morph
     mask = threshold_fg(diff, cfg, kopen, kclose)       # post-morph
     candidates = _candidates_from_mask(mask, cfg)
@@ -183,9 +186,11 @@ def track_roi(video_path, roi: CircleROI, bg: np.ndarray, cfg: AnyTrackConfig,
     (kills faint dwell ghosts); ``darkness_weight`` biases the pick toward the
     darkest/highest-contrast candidate. Both 0 → production behaviour."""
     scale = float(cfg.roi_downscale)
-    _, x0, y0, _ = roi_crop_geometry(roi, cfg.roi_downscale)
+    _, x0, y0, scaled = roi_crop_geometry(roi, cfg.roi_downscale)
     rcfg = _rescale_detect_params(cfg, scale)
     kopen, kclose = build_morph_kernels(rcfg)
+    arena_mask = (inscribed_disk_mask((scaled, scaled))
+                  if getattr(cfg, "detect_arena_mask", True) else None)
     max_jump_scaled = rcfg.max_jump_px / scale
     tracker = CentroidTracker(center_xy=(roi.r / scale, roi.r / scale),
                               max_jump=max_jump_scaled,
@@ -202,7 +207,8 @@ def track_roi(video_path, roi: CircleROI, bg: np.ndarray, cfg: AnyTrackConfig,
             break
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
         roi_gray = crop_roi_gray(gray, roi, cfg.roi_downscale)
-        cands = extract_ellipses(roi_gray, bg, rcfg, kernel_open=kopen, kernel_close=kclose)
+        cands = extract_ellipses(roi_gray, bg, rcfg, mask=arena_mask,
+                                 kernel_open=kopen, kernel_close=kclose)
         contrasts = [centroid_contrast(roi_gray, bg, c.x, c.y, rcfg) for c in cands]
         passed = _pick_candidates(cands, contrasts, tracker.last, max_jump_scaled,
                                   contrast_gate, darkness_weight)
@@ -240,9 +246,11 @@ def track_all_rois(video_path, rois: List[CircleROI], bgs: Dict[str, np.ndarray]
     for roi in rois:
         if bgs.get(roi.name) is None:
             continue
-        _, x0, y0, _ = roi_crop_geometry(roi, cfg.roi_downscale)
+        _, x0, y0, scaled = roi_crop_geometry(roi, cfg.roi_downscale)
         state[roi.name] = dict(
             roi=roi, x0=x0, y0=y0, bg=bgs[roi.name], prev=None, rows=[],
+            mask=(inscribed_disk_mask((scaled, scaled))
+                  if getattr(cfg, "detect_arena_mask", True) else None),
             tracker=CentroidTracker(center_xy=(roi.r / scale, roi.r / scale),
                                     max_jump=max_jump_scaled,
                                     miss_tolerance=rcfg.miss_tolerance,
@@ -258,7 +266,8 @@ def track_all_rois(video_path, rois: List[CircleROI], bgs: Dict[str, np.ndarray]
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
         for s in state.values():
             roi_gray = crop_roi_gray(gray, s["roi"], cfg.roi_downscale)
-            cands = extract_ellipses(roi_gray, s["bg"], rcfg, kernel_open=kopen, kernel_close=kclose)
+            cands = extract_ellipses(roi_gray, s["bg"], rcfg, mask=s["mask"],
+                                     kernel_open=kopen, kernel_close=kclose)
             contrasts = [centroid_contrast(roi_gray, s["bg"], c.x, c.y, rcfg) for c in cands]
             passed = _pick_candidates(cands, contrasts, s["tracker"].last, max_jump_scaled,
                                       contrast_gate, darkness_weight)

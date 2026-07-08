@@ -58,6 +58,19 @@ def build_morph_kernels(cfg: AnyTrackConfig):
     return kernel_open, kernel_close
 
 
+def inscribed_disk_mask(shape_hw) -> np.ndarray:
+    """uint8 {0,255} disk inscribed in an ``h×w`` crop (radius = ``min(h, w)//2``).
+
+    For a square ROI crop centred on the arena (as the fast/debug paths produce)
+    this is the arena disk, so anding the diff with it keeps detection inside the
+    arena and blanks the crop's corners. Shape-only, so callers that don't carry
+    the ROI geometry (the debug views) can still mask consistently."""
+    h, w = int(shape_hw[0]), int(shape_hw[1])
+    mask = np.zeros((h, w), np.uint8)
+    cv2.circle(mask, (w // 2, h // 2), min(h, w) // 2, 255, -1)
+    return mask
+
+
 def compute_diff(gray: np.ndarray, bg_gray: np.ndarray, cfg: AnyTrackConfig) -> np.ndarray:
     """Directional background difference per ``cfg.bgdiff_type``."""
     bgdiff_type = getattr(cfg, "bgdiff_type", "dark")

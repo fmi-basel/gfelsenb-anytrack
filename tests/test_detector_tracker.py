@@ -89,6 +89,48 @@ def test_extract_ellipses_detects_dark_blob():
     assert c.contour is not None
 
 
+# ---------------------------------------------------------------------------
+# Arena-disk masking: no contour/centroid detected outside the arena circle
+# ---------------------------------------------------------------------------
+
+def test_inscribed_disk_mask_geometry():
+    from anytrack.detector import inscribed_disk_mask
+    m = inscribed_disk_mask((100, 100))
+    assert m.shape == (100, 100) and m.dtype == np.uint8
+    assert m[50, 50] == 255          # centre inside the disk
+    assert m[2, 2] == 0 and m[97, 97] == 0   # corners outside
+
+
+def test_roi_mask_scaled_matches_downscaled_arena():
+    from anytrack.roi import roi_mask_scaled
+    roi = CircleROI(name="a", cx=100, cy=100, r=40)
+    x0, y0 = 60, 60                  # roi_crop_geometry offset (cx-r, cy-r)
+    m = roi_mask_scaled((40, 40), roi, (x0, y0), scale=2.0)   # scaled crop is 40×40
+    assert m.shape == (40, 40)
+    assert m[20, 20] == 255          # arena centre → (20, 20) at scale 2
+    assert m[1, 1] == 0              # corner masked out
+
+
+def test_extract_ellipses_masks_blob_outside_arena():
+    """A blob in the crop's corner (outside the arena disk) is dropped by the
+    mask, while the centred blob survives — the fix's core behaviour."""
+    cfg = _det_cfg()
+    bg = np.full((100, 100), 210, np.uint8)
+    img = bg.copy()
+    cv2.circle(img, (50, 50), 7, 20, -1)   # real fly, centre of the arena
+    cv2.circle(img, (8, 8), 6, 20, -1)     # artifact in the corner, outside the disk
+    kopen, kclose = build_morph_kernels(cfg)
+
+    from anytrack.detector import inscribed_disk_mask
+    unmasked = extract_ellipses(img, bg, cfg, kernel_open=kopen, kernel_close=kclose)
+    assert len(unmasked) == 2              # both blobs detected without a mask
+
+    mask = inscribed_disk_mask(img.shape[:2])
+    masked = extract_ellipses(img, bg, cfg, mask=mask, kernel_open=kopen, kernel_close=kclose)
+    assert len(masked) == 1                # corner blob removed
+    assert abs(masked[0].x - 50) < 3 and abs(masked[0].y - 50) < 3
+
+
 def test_debug_frame_matches_extract_ellipses():
     cfg = _det_cfg()
     img = _dark_blob()

@@ -108,6 +108,7 @@ from .preprocess import PreprocessResult
 from .detector import extract_ellipses, build_morph_kernels, centroid_contrast
 from .tracker import CentroidTracker
 from .coordinates import scaled_to_full
+from .roi import roi_mask_scaled
 
 
 def _rescale_detect_params(cfg: AnyTrackConfig, scale: float) -> AnyTrackConfig:
@@ -187,6 +188,12 @@ def _track_from_frames(
     # (trajectory.resample_to_frames in the session).
     rows = range(0, len(frame_indices), stride)
 
+    # Circular arena-disk mask so detection can't fire in the square crop's
+    # corners (outside the arena). Built once, lazily, from the first frame's
+    # actual shape (matches the decoded crop even when it was edge-clamped).
+    want_arena_mask = getattr(cfg, "detect_arena_mask", True)
+    arena_mask = None
+
     n_proc = 0
     _reported = 0
     _t_track = time.perf_counter()
@@ -207,11 +214,15 @@ def _track_from_frames(
         if bg is None:
             continue  # no background could be built → cannot track this ROI
 
+        if want_arena_mask and arena_mask is None:
+            arena_mask = roi_mask_scaled(gray.shape[:2], roi, (x0, y0), scale)
+
         # Drift-correct the background against the tracked object's last position
         # (opt-in); otherwise use the static background.
         bg_use = bg if bg_state is None else bg_state.corrected(gray, center=tracker.last)
         candidates = extract_ellipses(
             gray, bg_use, cfg,
+            mask=arena_mask,
             kernel_open=kernel_open,
             kernel_close=kernel_close,
         )

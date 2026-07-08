@@ -258,3 +258,24 @@ def roi_mask(shape_hw: Tuple[int, int], roi: CircleROI, offset_xy: Tuple[int, in
     r = int(round(roi.r))
     cv2.circle(mask, (cx, cy), r, 255, -1)
     return mask
+
+
+def roi_mask_scaled(shape_hw: Tuple[int, int], roi: CircleROI,
+                    offset_xy: Tuple[int, int], scale: float) -> np.ndarray:
+    """Circular arena-disk mask (uint8 {0,255}) for a *downscaled* ROI crop.
+
+    Like :func:`roi_mask` but for a crop downscaled by ``scale``: the arena centre
+    ``(roi.cx - x0, roi.cy - y0)`` and radius ``roi.r`` are divided by ``scale`` to
+    match the scaled-local coordinate frame the fast tracker detects in. Filling
+    the disk (radius = the detected arena radius) leaves the whole arena interior
+    intact and masks only the square crop's corners — everything outside the arena.
+    """
+    h, w = shape_hw
+    x0, y0 = offset_xy
+    s = float(scale) if scale else 1.0
+    mask = np.zeros((h, w), dtype=np.uint8)
+    cx = int(round((roi.cx - x0) / s))
+    cy = int(round((roi.cy - y0) / s))
+    r = int(round(roi.r / s))
+    cv2.circle(mask, (cx, cy), r, 255, -1)
+    return mask

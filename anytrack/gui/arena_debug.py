@@ -28,7 +28,7 @@ from ..models import CircleROI
 from ..background import build_background_image
 from ..roi import detect_circular_rois
 from ..preprocess import roi_crop_geometry
-from ..detector import build_morph_kernels, extract_ellipses
+from ..detector import build_morph_kernels, extract_ellipses, inscribed_disk_mask
 from ..tracker import CentroidTracker
 from ..tracking_fast import _rescale_detect_params
 from .debug_app import crop_roi_gray, build_roi_background, detect_stages, _to_bgr
@@ -69,8 +69,11 @@ def track_arena_debug(video_path, roi: CircleROI, bg: np.ndarray, cfg: AnyTrackC
 
     Coordinates are scaled-local (the frame the canvas shows)."""
     scale = float(cfg.roi_downscale)
+    _, _, _, scaled = roi_crop_geometry(roi, cfg.roi_downscale)
     rcfg = _rescale_detect_params(cfg, scale)
     kopen, kclose = build_morph_kernels(rcfg)
+    arena_mask = (inscribed_disk_mask((scaled, scaled))
+                  if getattr(cfg, "detect_arena_mask", True) else None)
     tracker = CentroidTracker(center_xy=(roi.r / scale, roi.r / scale),
                               max_jump=rcfg.max_jump_px / scale,
                               miss_tolerance=rcfg.miss_tolerance,
@@ -85,7 +88,8 @@ def track_arena_debug(video_path, roi: CircleROI, bg: np.ndarray, cfg: AnyTrackC
             break
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
         roi_gray = crop_roi_gray(gray, roi, cfg.roi_downscale)
-        cands = extract_ellipses(roi_gray, bg, rcfg, kernel_open=kopen, kernel_close=kclose)
+        cands = extract_ellipses(roi_gray, bg, rcfg, mask=arena_mask,
+                                 kernel_open=kopen, kernel_close=kclose)
         chosen, xf, yf = tracker.step(cands)
         out.append(dict(
             frame=i,
