@@ -395,7 +395,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         prog="anytrack-run",
         description="Run the full tracking pipeline headless and write the results to a chosen path.",
     )
-    ap.add_argument("--video", required=True, type=Path, help="Source video.")
+    ap.add_argument("--video", required=True, type=Path, help="Source video or path of source videos.")
     ap.add_argument("--timing", type=Path, default=None,
                     help="Per-frame timing CSV (default: <video>.csv).")
     ap.add_argument("--output", "-o", type=Path, default=None,
