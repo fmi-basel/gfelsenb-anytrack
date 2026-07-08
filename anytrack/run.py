@@ -389,44 +389,74 @@ def _print_run_config(cfg) -> None:
 
 
 def _print_dry_run(videos, cfg, args, single) -> None:
-    """--dry-run: report what a real run would do (steps 1-3) and stop.
+    """--dry-run: a colorized plan of what a real run would do (steps 1-3), then stop.
 
     The inputs are already resolved + validated by the time we get here, so this
-    just prints the run plan — mode, batch concurrency, the flag-enabled stages,
-    and the (video, timing) pairs that would be processed — without loading a
-    frame or writing any output. The scope-preview companion to anytrack-validate.
+    just renders the run plan — mode, batch concurrency, the flag-enabled pipeline
+    stages (as colour-coded chips in execution order), any --roi restriction, and
+    the (video, timing) pairs — without loading a frame or writing output. Colours
+    are emitted only to a TTY, so redirected/piped output stays plain. The
+    scope-preview companion to anytrack-validate.
     """
-    from .cli_progress import header, info, ok
-    header("dry run")
+    import sys
+    from .cli_progress import _ANSI, _BOLD, _DIM, _RESET
+
+    tty = bool(getattr(sys.stdout, "isatty", lambda: False)())
+    R = _RESET if tty else ""
+    B = _BOLD if tty else ""
+    D = _DIM if tty else ""
+    def col(key):                       # stage colour, or "" off-TTY / for None
+        return _ANSI.get(key, "") if tty else ""
+
     n = len(videos)
+    bg_only = getattr(args, "bg_only", False)
+
+    print()
+    print(f"{D}{'─' * 60}{R}")
+    print(f" {col('preprocess')}{B}DRY RUN{R}  {D}plan only — nothing is processed{R}")
+    print(f"{D}{'─' * 60}{R}")
+
+    def field(label, value):
+        print(f"  {D}{label:<8}{R} {value}")
+
     mode = "fast" if cfg.fast_mode else "legacy"
     if n > 1:
-        info(f"{n} video(s) · {mode} mode · {_batch_concurrency(cfg, n)}× concurrent")
-    else:
-        info(f"1 video · {mode} mode")
+        mode += f"  {D}·{R}  {B}{_batch_concurrency(cfg, n)}×{R} concurrent"
+    field("mode", f"{B}{mode}{R}" if n == 1 else mode)
+    field("videos", f"{B}{n}{R}")
 
-    stages = ["track", "write"]
-    if getattr(args, "bg_only", False):
-        stages = ["backgrounds (--bg-only: stop before tracking)"]
+    # Pipeline stages as (name, colour-key) chips in execution order; key None =
+    # no colour (keeps 'write' distinct from the same-green 'track').
+    if bg_only:
+        stages = [("backgrounds", "preprocess")]
     else:
+        stages = []
         if getattr(cfg, "port_detect_enabled", False):
-            stages.insert(0, "odor-port detection")
+            stages.append(("odor-port", "roi"))
+        stages.append(("track", "track"))
         if getattr(cfg, "bg_refine_stuck", False):
-            stages.append("stuck-fly repair")
+            stages.append(("stuck-fly repair", "roi"))
+        stages.append(("write", None))
         if getattr(cfg, "pose_enabled", False):
-            stages.append("pose")
+            stages.append(("pose", "pose"))
         if args.qc or args.qc_full:
-            stages.append("QC")
+            stages.append(("QC", "qc"))
         if getattr(args, "crops", False):
-            stages.append("crops")
-    if getattr(args, "roi", None):
-        stages.append(f"restricted to ROI(s): {', '.join(args.roi)}")
-    info("stages: " + " · ".join(stages))
+            stages.append(("crops", "qc"))
+    chips = f"  {D}→{R}  ".join(f"{col(k)}●{R} {col(k)}{name}{R}" for name, k in stages)
+    field("pipeline", chips)
 
+    if getattr(args, "roi", None):
+        field("arenas", f"{col('roi')}{', '.join(args.roi)}{R}  {D}(--roi){R}")
+
+    print(f"\n  {D}inputs{R}")
+    w = len(str(n))
     for i, v in enumerate(videos, 1):
         tm = args.timing if (single and args.timing) else Path(v).with_suffix(".csv")
-        info(f"  {i:>2}. {Path(v).name}   (timing: {Path(tm).name})")
-    ok(f"dry run — no processing performed; {n} video(s) would be processed")
+        print(f"    {D}{i:>{w}}{R}  {B}{Path(v).name}{R}  {D}↳ {Path(tm).name}{R}")
+
+    print(f"\n  {col('done')}✓{R} {B}dry run{R} {D}·{R} {n} video(s) would be processed"
+          f"  {D}· no output written{R}")
 
 
 def main(argv: Optional[List[str]] = None) -> int:

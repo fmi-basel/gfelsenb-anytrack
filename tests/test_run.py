@@ -172,9 +172,11 @@ def test_dry_run_processes_nothing(tmp_path, monkeypatch, capsys):
     assert not out.exists()                              # nothing written
     assert not (out.parent / f"{out.stem}_qc").exists()  # QC not run either
     txt = capsys.readouterr().out
-    assert "dry run" in txt
-    assert "track · write · QC" in txt                   # enabled stages listed
+    assert "DRY RUN" in txt and "dry run" in txt
+    for stage in ("track", "write", "QC"):               # enabled pipeline stages listed
+        assert stage in txt
     assert "vid.avi" in txt and "vid.csv" in txt         # the (video, timing) pair
+    assert "no output written" in txt
 
 
 def test_print_run_config(capsys):
