@@ -138,8 +138,19 @@ def threshold_fg(
     return bw
 
 
-def _candidates_from_mask(bw: np.ndarray, cfg: AnyTrackConfig) -> List[EllipseCandidate]:
-    """Fit ellipses to the foreground blobs of a binary mask, filtered by area."""
+def _candidates_from_mask(
+    bw: np.ndarray, cfg: AnyTrackConfig, mask: Optional[np.ndarray] = None
+) -> List[EllipseCandidate]:
+    """Fit ellipses to the foreground blobs of a binary mask, filtered by area.
+
+    A candidate is dropped when its fitted ellipse **centre** falls outside the
+    image — or, if ``mask`` is given, outside that mask. ``cv2.fitEllipse`` on a
+    thin/arc-shaped contour (e.g. a sliver of the arena rim clipped by the arena
+    mask) can place the centre far from the blob, even beyond the frame; without
+    this guard such a centre becomes a phantom candidate the tracker can lock
+    onto, yielding a centroid outside the arena.
+    """
+    h, w = bw.shape[:2]
     cnts, _ = cv2.findContours(bw, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     cand: List[EllipseCandidate] = []
     for c in cnts:
@@ -149,6 +160,11 @@ def _candidates_from_mask(bw: np.ndarray, cfg: AnyTrackConfig) -> List[EllipseCa
         if len(c) < 5:
             continue
         (x, y), (MA, ma), angle = cv2.fitEllipse(c)
+        xi, yi = int(round(x)), int(round(y))
+        if not (0 <= xi < w and 0 <= yi < h):
+            continue                      # fitted centre outside the image (arc artifact)
+        if mask is not None and mask[yi, xi] == 0:
+            continue                      # centre outside the arena disk
         major = float(max(MA, ma))
         minor = float(min(MA, ma))
         # OpenCV's ellipse angle is measured with a flipped y-axis; the
@@ -190,7 +206,7 @@ def extract_ellipses(
     if mask is not None:
         diff = cv2.bitwise_and(diff, diff, mask=mask)
     bw = threshold_fg(diff, cfg, kernel_open, kernel_close)
-    return _candidates_from_mask(bw, cfg)
+    return _candidates_from_mask(bw, cfg, mask=mask)
 
 
 def debug_frame(
@@ -209,5 +225,5 @@ def debug_frame(
     if mask is not None:
         diff = cv2.bitwise_and(diff, diff, mask=mask)
     bw = threshold_fg(diff, cfg, kernel_open, kernel_close)
-    candidates = _candidates_from_mask(bw, cfg)
+    candidates = _candidates_from_mask(bw, cfg, mask=mask)
     return DebugFrame(diff=diff, mask=bw, candidates=candidates)

@@ -166,12 +166,13 @@ def detect_stages(roi_gray: np.ndarray, bg: np.ndarray, cfg: AnyTrackConfig) -> 
     """All detector artifacts for one ROI frame: diff, pre-morph threshold,
     post-morph mask, and the area-filtered candidates (mirrors detector.py)."""
     kopen, kclose = build_morph_kernels(cfg)
+    arena = inscribed_disk_mask(roi_gray.shape[:2]) if getattr(cfg, "detect_arena_mask", True) else None
     diff = compute_diff(roi_gray, bg, cfg)
-    if getattr(cfg, "detect_arena_mask", True):         # blank the crop's corners (outside the arena)
-        diff = cv2.bitwise_and(diff, diff, mask=inscribed_disk_mask(roi_gray.shape[:2]))
+    if arena is not None:                               # blank the crop's corners (outside the arena)
+        diff = cv2.bitwise_and(diff, diff, mask=arena)
     thr = threshold_fg(diff, cfg)                       # pre-morph
     mask = threshold_fg(diff, cfg, kopen, kclose)       # post-morph
-    candidates = _candidates_from_mask(mask, cfg)
+    candidates = _candidates_from_mask(mask, cfg, mask=arena)
     return {"diff": diff, "threshold": thr, "mask": mask, "candidates": candidates}
 
 

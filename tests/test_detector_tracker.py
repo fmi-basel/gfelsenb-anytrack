@@ -111,6 +111,30 @@ def test_roi_mask_scaled_matches_downscaled_arena():
     assert m[1, 1] == 0              # corner masked out
 
 
+def test_ellipse_centre_outside_mask_is_dropped():
+    """A blob whose fitted centre falls outside the arena mask is rejected."""
+    from anytrack.detector import _candidates_from_mask
+    cfg = _det_cfg(expected_fly_area_min=5)
+    bw = np.zeros((120, 120), np.uint8)
+    cv2.circle(bw, (60, 60), 7, 255, -1)                       # compact blob at the centre
+    assert len(_candidates_from_mask(bw, cfg)) == 1            # no mask → kept
+    m0 = np.zeros((120, 120), np.uint8)                        # mask excludes everything
+    assert len(_candidates_from_mask(bw, cfg, mask=m0)) == 0   # centre outside mask → dropped
+    m1 = np.zeros((120, 120), np.uint8); cv2.circle(m1, (60, 60), 40, 255, -1)
+    assert len(_candidates_from_mask(bw, cfg, mask=m1)) == 1   # centre inside mask → kept
+
+
+def test_arc_contour_never_yields_out_of_image_centroid():
+    """cv2.fitEllipse on an arc can place its centre off-image; such candidates
+    (the localsearch arena_01 bug) must be dropped, never returned."""
+    from anytrack.detector import _candidates_from_mask
+    cfg = _det_cfg(expected_fly_area_min=5, expected_fly_area_max=100000)
+    bw = np.zeros((200, 200), np.uint8)
+    cv2.ellipse(bw, (100, -150), (220, 220), 0, 55, 125, 255, 4)  # arc of a circle centred above the frame
+    cands = _candidates_from_mask(bw, cfg)
+    assert all(0 <= c.x < 200 and 0 <= c.y < 200 for c in cands)  # no centroid outside the image
+
+
 def test_extract_ellipses_masks_blob_outside_arena():
     """A blob in the crop's corner (outside the arena disk) is dropped by the
     mask, while the centred blob survives — the fix's core behaviour."""
