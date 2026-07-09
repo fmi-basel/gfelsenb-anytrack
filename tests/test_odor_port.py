@@ -33,6 +33,26 @@ def test_classical_finds_central_port():
     assert p.offset_frac < 0.05 and 4 <= p.r <= 20 and p.conf > 0
 
 
+def _faint_disk_frame(cx=150, cy=150, port_r=11):
+    """Arena with a *large, low-contrast* circular port — the real fixture shape.
+
+    A darkness-blob detector latches onto interior sub-spots and mis-sizes such a
+    port; the edge (radial-gradient) detector should localize its rim and size it."""
+    f = np.zeros((300, 300), np.uint8)
+    cv2.circle(f, (150, 150), 100, 200, -1)          # bright arena floor
+    cv2.circle(f, (cx, cy), port_r, 165, -1)         # faint darker disk (Δ~35)
+    return cv2.GaussianBlur(f, (0, 0), 2.0)          # low-contrast, soft-edged
+
+
+def test_edge_detector_sizes_low_contrast_port():
+    """Regression: the port is sized at its true (larger) radius, not ~half."""
+    roi = CircleROI(name="arena_01", cx=150, cy=150, r=100)
+    p = detect_odor_port(_faint_disk_frame(port_r=11), roi, AnyTrackConfig())
+    assert p is not None and p.backend == "classical"
+    assert abs(p.cx - 150) <= 3 and abs(p.cy - 150) <= 3
+    assert abs(p.r - 11) <= 3 and p.conf > 0
+
+
 def test_offcentre_blob_not_taken_as_port():
     """A fly at the wall must not be mistaken for the (central) port."""
     roi = CircleROI(name="arena_01", cx=150, cy=150, r=100)

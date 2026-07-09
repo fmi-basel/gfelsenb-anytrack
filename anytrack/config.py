@@ -164,13 +164,14 @@ class AnyTrackConfig:
     # Odor-port detection (locate the central odor source per arena; adds fly-to-port
     # distance to the tracks). Detected once per arena on the static model background.
     port_detect_enabled: bool = False   # run port detection after ROI detection
-    port_backend: str = "classical"     # "classical" (central dark spot, no deps) | "sam" (Segment Anything, opt-in)
-    port_darkness_margin: int = 15      # gray levels a port pixel must be below the local floor
+    port_backend: str = "classical"     # "classical" (central dark disk, no deps) | "sam" (Segment Anything, opt-in)
+    port_darkness_margin: int = 15      # (legacy) gray levels a port pixel must be below the local floor
+    port_edge_min: float = 4.0          # min mean radial-gradient response (gray/px) to accept a circular port
     port_min_area: int = 12             # min port area (full-res px) — reject noise
     port_max_area: int = 20000          # max port area (full-res px) — reject large dark regions
-    port_max_center_frac: float = 0.30  # port centroid must be within this fraction of R from the arena centre
-    port_radius_frac_min: float = 0.02  # port radius search range as a fraction of the arena radius R
-    port_radius_frac_max: float = 0.10
+    port_max_center_frac: float = 0.30  # port centre must be within this fraction of R from the arena centre
+    port_radius_frac_min: float = 0.04  # port radius search range as a fraction of the arena radius R
+    port_radius_frac_max: float = 0.14
     port_shared_radius: bool = True     # enforce a constant port size across arenas (median of per-arena radii)
     sam_model_path: str = ""            # SAM checkpoint path (empty → falls back to classical)
     sam_device: str = "auto"            # torch device for SAM: auto|mps|cuda|cpu

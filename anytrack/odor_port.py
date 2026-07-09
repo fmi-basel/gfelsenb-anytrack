@@ -9,9 +9,10 @@ tell a stationary fly from the port.
 Detection is behind a small backend-agnostic :class:`SegmentEngine`, mirroring the
 pose :class:`~anytrack.pose.engine.PoseEngine` pattern:
 
-- :class:`ClassicalPortDetector` (default, zero-dependency) — the port is the compact
-  dark spot nearest the arena centre (darker than a smooth local-floor estimate). This
-  is exactly the component the background analysis found at r/R≈0 in every arena.
+- :class:`ClassicalPortDetector` (default, zero-dependency) — the port is a dark
+  circular fixture near the arena centre; it is found by a circular-edge matched
+  filter (strongest outward radial gradient) within a central window and a
+  constant-size radius band, not by interior darkness.
 - :class:`SamPortDetector` (opt-in, ``port_backend="sam"``) — prompts a Segment
   Anything model at the arena centre and takes the returned mask. Lazily imports
   torch/SAM; falls back to the classical detector if unavailable, so the core install
@@ -60,75 +61,113 @@ class SegmentEngine(Protocol):
                     ) -> Optional[Tuple[float, float, float, float, np.ndarray]]: ...
 
 
+def _radial_edge_score(gx, gy, cxs, cys, radii, K):
+    """Best ``(response, cx, cy, r)`` of a circular-edge matched filter.
+
+    For each candidate centre in the ``cys × cxs`` grid and each radius, scores the
+    **mean outward radial image gradient** sampled at ``K`` points around the circle
+    (``gx·cosθ + gy·sinθ``). A dark disk on a brighter floor has intensity rising
+    outward across its rim, so its boundary gives a strong positive response at the
+    true centre/radius — the signature of the odor-port fixture. Returns the argmax
+    over the whole grid (``response`` in gray-levels per pixel), or ``None``.
+    """
+    h, w = gx.shape
+    th = np.linspace(0.0, 2.0 * np.pi, K, endpoint=False)
+    ct, st = np.cos(th), np.sin(th)
+    CX, CY = np.meshgrid(np.asarray(cxs, np.float32), np.asarray(cys, np.float32))
+    best = None
+    for r in radii:
+        acc = np.zeros(CX.shape, np.float32)
+        for k in range(K):
+            sx = np.clip((CX + r * ct[k]).round().astype(np.intp), 0, w - 1)
+            sy = np.clip((CY + r * st[k]).round().astype(np.intp), 0, h - 1)
+            acc += gx[sy, sx] * ct[k] + gy[sy, sx] * st[k]
+        acc /= K
+        i = int(np.argmax(acc))
+        resp = float(acc.flat[i])
+        if best is None or resp > best[0]:
+            best = (resp, float(CX.flat[i]), float(CY.flat[i]), float(r))
+    return best
+
+
 class ClassicalPortDetector:
-    """The port = a small dark disk near the arena centre, of ~constant size.
+    """The port = a dark circular fixture near the arena centre, of ~constant size.
 
-    Uses both priors instead of a brittle brightness threshold:
-    - *central*: only the window within ``port_max_center_frac``·R of the arena
-      centre is searched, so an off-centre fly can never be taken as the port.
-    - *constant, small size*: a scale-space blob detector (Difference-of-Gaussians
-      over a radius grid ``port_radius_frac_min..max``·R) selects the radius by the
-      scale that best matches a compact dark blob — a principled size, not a
-      threshold-dependent connected-component area. Localization is by the blob
-      response + a darkness-weighted centroid (sub-pixel, threshold-free), and a
-      candidate is accepted only if the mean darkness over the disk clears
-      ``port_darkness_margin`` (an interpretable contrast check).
-
-    (The single shared size across arenas is applied in :func:`detect_ports`.)
+    The port is a low-contrast *ring/well* (its interior texture varies), so a
+    darkness-blob detector latches onto internal sub-spots and mis-sizes it. This
+    detector keys on the fixture's **circular edge** instead, using all three priors:
+    - *central*: only centres within ``port_max_center_frac``·R of the arena centre
+      are searched, so an off-centre fly can never be taken as the port.
+    - *circular*: a matched filter scores each candidate ``(centre, radius)`` by the
+      mean outward radial image gradient around that circle (:func:`_radial_edge_score`)
+      — robust to fill and to low contrast, and it localizes the rim, not a dark lobe.
+    - *constant, small size*: the radius is searched only in ``port_radius_frac_min..
+      max``·R; a coarse pass on a 2× downscaled crop localizes the circle and a
+      full-resolution local pass refines it. A port is accepted only if the response
+      clears ``port_edge_min`` (mean gray-levels/px — an interpretable edge-contrast
+      check). (The single shared size across arenas is applied in :func:`detect_ports`.)
     """
 
     name = "classical"
+    K_COARSE = 36
+    K_FINE = 64
 
     def __init__(self, cfg):
-        self.margin = float(getattr(cfg, "port_darkness_margin", 15))
+        self.edge_min = float(getattr(cfg, "port_edge_min", 4.0))
         self.search_frac = float(getattr(cfg, "port_max_center_frac", 0.30))
-        self.rmin_f = float(getattr(cfg, "port_radius_frac_min", 0.02))
-        self.rmax_f = float(getattr(cfg, "port_radius_frac_max", 0.10))
-        self.n_scales = 12
+        self.rmin_f = float(getattr(cfg, "port_radius_frac_min", 0.04))
+        self.rmax_f = float(getattr(cfg, "port_radius_frac_max", 0.14))
+
+    @staticmethod
+    def _gradients(img, sigma):
+        import cv2
+        gs = cv2.GaussianBlur(img.astype(np.float32), (0, 0), sigma)
+        gx = cv2.Sobel(gs, cv2.CV_32F, 1, 0, ksize=3)
+        gy = cv2.Sobel(gs, cv2.CV_32F, 0, 1, ksize=3)
+        return gx, gy
 
     def detect_port(self, roi_gray, center, radius):
         import cv2
-        cx0, cy0 = center
+        cx0, cy0 = float(center[0]), float(center[1])
+        R = float(radius)
+        if roi_gray.size == 0 or R < 8.0:
+            return None
+        win = self.search_frac * R
+        rmin = max(2.0, self.rmin_f * R)
+        rmax = max(rmin + 1.0, self.rmax_f * R)
+        ds = max(1, int(round(R / 240.0)))          # keep the search grid bounded on big arenas
+
+        # coarse pass on a downscaled crop — localizes the circle cheaply
+        g = roi_gray if ds == 1 else cv2.resize(
+            roi_gray, (0, 0), fx=1.0 / ds, fy=1.0 / ds, interpolation=cv2.INTER_AREA)
+        gx, gy = self._gradients(g, 1.2)
+        cxs = np.arange(int((cx0 - win) / ds), int((cx0 + win) / ds) + 1)
+        cys = np.arange(int((cy0 - win) / ds), int((cy0 + win) / ds) + 1)
+        radii = np.arange(rmin / ds, rmax / ds + 1e-6, 1.0)
+        if cxs.size == 0 or cys.size == 0 or radii.size == 0:
+            return None
+        coarse = _radial_edge_score(gx, gy, cxs, cys, radii, self.K_COARSE)
+        if coarse is None:
+            return None
+        bx, by, br = coarse[1] * ds, coarse[2] * ds, coarse[3] * ds
+
+        # full-resolution local refine around the coarse hit
+        gxf, gyf = self._gradients(roi_gray, 2.0)
+        w = ds + 1
+        cxs = np.arange(int(bx - w), int(bx + w) + 1)
+        cys = np.arange(int(by - w), int(by + w) + 1)
+        radii = np.arange(max(rmin, br - w), min(rmax, br + w) + 1e-6, 1.0)
+        fine = _radial_edge_score(gxf, gyf, cxs, cys, radii, self.K_FINE)
+        resp, px, py, r_sel = fine if fine is not None else (coarse[0], bx, by, br)
+
+        if resp < self.edge_min:                    # no clear circular fixture here
+            return None
+        if np.hypot(px - cx0, py - cy0) > win:      # centre must stay central
+            return None
+        conf = float(np.clip(resp / (4.0 * self.edge_min), 0.0, 1.0))
         h, w = roi_gray.shape[:2]
-        f0 = roi_gray.astype(np.float32)
-        # darkness above a smooth local floor (positive at a dark spot)
-        floor = cv2.GaussianBlur(f0, (0, 0), max(3.0, radius / 6.0))
-        dark = np.clip(floor - f0, 0.0, None)
         yy, xx = np.mgrid[0:h, 0:w]
-        central = (xx - cx0) ** 2 + (yy - cy0) ** 2 <= (self.search_frac * radius) ** 2
-        if not central.any():
-            return None
-
-        # DoG scale space over a radius grid; pick the (scale, location) with the
-        # strongest compact-blob response inside the central window.
-        radii = np.geomspace(max(2.0, self.rmin_f * radius),
-                             max(3.0, self.rmax_f * radius), self.n_scales)
-        best = None   # (response, radius, y, x)
-        for r in radii:
-            s = float(r) / np.sqrt(2.0)
-            dog = cv2.GaussianBlur(dark, (0, 0), s) - cv2.GaussianBlur(dark, (0, 0), s * 1.6)
-            dog[~central] = -1e18
-            yx = np.unravel_index(int(np.argmax(dog)), dog.shape)
-            resp = float(dog[yx])
-            if best is None or resp > best[0]:
-                best = (resp, float(r), int(yx[0]), int(yx[1]))
-        _, r_sel, cy_pk, cx_pk = best
-
-        # darkness-weighted centroid within the selected disk (sub-pixel centre)
-        disk = (xx - cx_pk) ** 2 + (yy - cy_pk) ** 2 <= r_sel * r_sel
-        wd = dark[disk]
-        contrast = float(wd.mean()) if wd.size else 0.0
-        if contrast < self.margin:                     # no sufficiently dark central spot
-            return None
-        wsum = float(wd.sum())
-        if wsum > 0:
-            px = float((xx[disk] * dark[disk]).sum() / wsum)
-            py = float((yy[disk] * dark[disk]).sum() / wsum)
-        else:
-            px, py = float(cx_pk), float(cy_pk)
-        if np.hypot(px - cx0, py - cy0) > self.search_frac * radius:   # centre still central
-            return None
-        conf = float(np.clip(contrast / (2 * self.margin), 0.0, 1.0))
+        disk = (xx - px) ** 2 + (yy - py) ** 2 <= r_sel * r_sel
         return px, py, float(r_sel), conf, disk
 
 
