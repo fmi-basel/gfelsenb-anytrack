@@ -140,7 +140,7 @@
   <div class="meta">
     <span>Last updated: <strong id="updated"></strong></span>
     <span id="progressText"></span>
-    <span>Tests: <strong>197 passing</strong> (accuracy/perf need a video)</span>
+    <span>Tests: <strong>198 passing</strong> (accuracy/perf need a video)</span>
     <span><a href="tutorial.html">Tutorial &amp; usage guide →</a></span>
     <span><a href="optimization_planning.html">Performance optimization planning →</a></span>
     <span><a href="streaming_bg_parity.html">Streaming background parity fix →</a></span>
@@ -235,7 +235,7 @@ const PIPELINE = [
   {name:"Output (tracks / pose / diagnostics)", mod:"writer.py", status:"done",
    desc:"Parquet-default (CSV kept) writer + streaming TrackWriter implemented. Pose/diagnostics schemas + session auto-save wiring land with A7/B."},
   {name:"Odor-port detection", mod:"odor_port.py", status:"done",
-   desc:"Locate the central odor-delivery port per arena on the static model background (opt-in, --detect-port / cfg.port_detect_enabled). Backend-agnostic SegmentEngine: ClassicalPortDetector (default, zero-dep — the compact dark spot nearest the arena centre) validated on all 32 arenas of 2025-12-11 (found 32/32, ≤2% of R off-centre); SamPortDetector (opt-in port_backend='sam', lazy torch+SAM, graceful fallback) for robustness. Adds dist_to_port_px/mm to the tracks (odor-source distance = the local-search readout) and a <stem>_ports.json sidecar; also disambiguates a stationary fly from the port. See background_modelling.html."},
+   desc:"Locate the central odor-delivery port per arena on the static model background (opt-in, --detect-port / cfg.port_detect_enabled). Backend-agnostic SegmentEngine: ClassicalPortDetector (default, zero-dep — the compact dark spot nearest the arena centre) validated on all 32 arenas of 2025-12-11 (found 32/32, ≤2% of R off-centre); SamPortDetector (opt-in port_backend='sam', lazy torch+SAM, graceful fallback) for robustness. Adds dist_to_port_px/mm to the tracks (odor-source distance = the local-search readout) and, whenever ports are detected, a <stem>_ports.json sidecar plus a <stem>_ports.png overlay (the model background with a magenta circle+crosshair+label per detected port) — written in both --detect-port tracking runs and --bg-only --detect-port (no tracking); also disambiguates a stationary fly from the port. See background_modelling.html."},
   {name:"QC overlays & diagnostics", mod:"qc.py", status:"done",
    desc:"Post-hoc QC (A9): background PNG, ROI-colored overlay (arena circles+labels, per-ROI centroids/trails, red flag ring annotated with which flag(s) fired (area/jump/oob/multi/lowC, edge-aware placement; toggle cfg.qc_overlay_flag_labels); frame number burned in the bottom-right corner; trace defaults to the FULL path up to the current frame, capped via --trace/cfg.qc_overlay_trace where -1=full), distributions figure, per-ROI timeseries (area/candidates/contrast/major/minor/angle), kinematics timeseries (speed/ang-speed/dist), occupancy heatmaps, coverage raster, flagged-frame montage, per-frame flags (incl. low-contrast) + JSON summary, background drift-over-time (shown only when bg_drift_correction was on, fed by the A4 BackgroundState via the additive bg_drift column), and a single qc_report.html bundling it all. When ports are given (--detect-port): the overlay marks each odor port (magenta crosshair) + a live fly→port line/distance, and the kinematics figure gains a dist-to-port panel. anytrack-qc CLI."},
 ];

@@ -289,6 +289,23 @@ def test_save_frame_diff(tmp_path):
     assert diff[10, 10] < 10                            # untouched background ~ 0
 
 
+def test_save_port_overlay(tmp_path):
+    """_save_port_overlay writes <stem>_ports.png with a magenta port marker."""
+    from anytrack.odor_port import PortDetection
+    bg = np.full((200, 200), 180, np.uint8)
+    rois = [CircleROI(name="arena_01", cx=100, cy=100, r=80)]
+    ports = {"arena_01": PortDetection(roi="arena_01", cx=100, cy=100, r=12,
+                                       conf=0.8, backend="classical", offset_frac=0.0)}
+    p = run_mod._save_port_overlay(bg, ports, rois, tmp_path, "clip", batch=True)
+    assert p == tmp_path / "clip_ports.png"
+    img = cv2.imread(str(p))                                # BGR
+    magenta = ((img[:, :, 0] > 200) & (img[:, :, 1] < 80) & (img[:, :, 2] > 200)).sum()
+    assert magenta > 0                                      # port drawn in magenta
+    # nothing to draw → no file, returns None
+    assert run_mod._save_port_overlay(bg, {}, rois, tmp_path, "clip2", batch=True) is None
+    assert not (tmp_path / "clip2_ports.png").exists()
+
+
 def _fake_roi_bgs(video_path, rois, cfg, fly_masks=None, flags=None, sample_stack=None):
     """Stand-in for build_roi_backgrounds_uniform: flat backgrounds + a small mask."""
     out = {}

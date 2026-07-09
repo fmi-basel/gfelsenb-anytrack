@@ -135,6 +135,37 @@ def _stage_brackets(stage_s: dict) -> str:
     return f" ({' · '.join(parts)})" if parts else ""
 
 
+def _save_port_overlay(bg_img, ports, rois, dst, stem, *, batch) -> Optional["Path"]:
+    """Save the full-frame model background with detected odor ports drawn on it.
+
+    ``<stem>_ports.png``: the grayscale model background with faint arena outlines
+    plus, per detected port, a magenta circle (radius = the detected port radius) +
+    crosshair + a ``<arena> r=.. c=..`` label. A visual companion to the
+    ``<stem>_ports.json`` record. Returns the path, or None if there is nothing to draw.
+    """
+    if bg_img is None or not ports:
+        return None
+    import cv2
+    vis = cv2.cvtColor(bg_img, cv2.COLOR_GRAY2BGR) if bg_img.ndim == 2 else bg_img.copy()
+    for r in rois:                                   # faint arena outlines for context
+        cv2.circle(vis, (int(round(r.cx)), int(round(r.cy))), int(round(r.r)),
+                   (70, 70, 70), 1, cv2.LINE_AA)
+    for name, p in ports.items():
+        c = (int(round(p.cx)), int(round(p.cy)))
+        rr = max(3, int(round(p.r)))
+        cv2.circle(vis, c, rr, (255, 0, 255), 2, cv2.LINE_AA)
+        cv2.drawMarker(vis, c, (255, 0, 255), cv2.MARKER_CROSS, 22, 2, cv2.LINE_AA)
+        cv2.putText(vis, f"{name} r={p.r:.0f} c={p.conf:.2f}", (c[0] + rr + 6, c[1] - 6),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 2, cv2.LINE_AA)
+    dst = Path(dst)
+    dst.mkdir(parents=True, exist_ok=True)
+    path = dst / f"{stem}_ports.png"
+    cv2.imwrite(str(path), vis)
+    if not batch:
+        ok(f"saved odor-port overlay → {path}")
+    return path
+
+
 def _run_one(video_path, idx: int, n: int, *, args, cfg, single, group=None) -> Optional[int]:
     """Run the full pipeline on one video; return its tracked row count (or None).
 
@@ -260,10 +291,11 @@ def _run_one(video_path, idx: int, n: int, *, args, cfg, single, group=None) -> 
         if bg_flags:            # per-ROI adaptive-model diagnostics (tier / flag)
             import json
             (dst / f"{out.stem}_bg_flags.json").write_text(json.dumps(bg_flags, indent=1))
-        if ports:               # detected odor ports (full-frame px)
+        if ports:               # detected odor ports (full-frame px) + overlay PNG
             import json
             (dst / f"{out.stem}_ports.json").write_text(
                 json.dumps({n: p.as_dict() for n, p in ports.items()}, indent=1))
+            _save_port_overlay(bg_img, ports, video.rois, dst, out.stem, batch=batch)
         total = time.perf_counter() - t_video
         if bp is not None:
             bp.finish(f"{len(video.rois)} ROIs · backgrounds only · {_fmt_dt(total)}")
@@ -312,13 +344,14 @@ def _run_one(video_path, idx: int, n: int, *, args, cfg, single, group=None) -> 
 
     out = _resolve_output_path(args.output, cfg, video)
     fmt = "csv" if out.suffix.lower() == ".csv" else None
-    if ports:                       # add fly-to-port distance + write a port sidecar
+    if ports:                       # add fly-to-port distance + write a port sidecar + overlay PNG
         import json
         from .odor_port import add_port_distance
         add_port_distance(df, ports, video.rois, cfg)
         out.parent.mkdir(parents=True, exist_ok=True)
         (out.parent / f"{out.stem}_ports.json").write_text(
             json.dumps({n: p.as_dict() for n, p in ports.items()}, indent=1))
+        _save_port_overlay(bg_img, ports, video.rois, out.parent, out.stem, batch=batch)
     write_tracks(df, out, fmt=fmt)
 
     # Optionally dump the per-ROI backgrounds that actually drove tracking (the
