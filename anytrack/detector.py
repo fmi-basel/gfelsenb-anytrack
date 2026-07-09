@@ -143,12 +143,15 @@ def _candidates_from_mask(
 ) -> List[EllipseCandidate]:
     """Fit ellipses to the foreground blobs of a binary mask, filtered by area.
 
-    A candidate is dropped when its fitted ellipse **centre** falls outside the
-    image — or, if ``mask`` is given, outside that mask. ``cv2.fitEllipse`` on a
-    thin/arc-shaped contour (e.g. a sliver of the arena rim clipped by the arena
-    mask) can place the centre far from the blob, even beyond the frame; without
-    this guard such a centre becomes a phantom candidate the tracker can lock
-    onto, yielding a centroid outside the arena.
+    The candidate **position is the contour's centre of mass** (image moments),
+    not the ``cv2.fitEllipse`` centre. On a non-convex / arc-shaped contour — e.g.
+    a wall-hugging fly whose blob is clipped by the arena mask into a crescent —
+    the least-squares ellipse centre can land far from the blob, even off-image,
+    which either mis-placed the centroid or (with the guard below) dropped the
+    detection entirely. The moment centroid is always inside the blob, so it is
+    robust for any shape; ``fitEllipse`` is kept only for the orientation/axes.
+    As a backstop a candidate is still dropped if its centroid falls outside the
+    image or, when ``mask`` is given, outside that mask.
     """
     h, w = bw.shape[:2]
     cnts, _ = cv2.findContours(bw, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -159,12 +162,15 @@ def _candidates_from_mask(
             continue
         if len(c) < 5:
             continue
-        (x, y), (MA, ma), angle = cv2.fitEllipse(c)
+        (ex, ey), (MA, ma), angle = cv2.fitEllipse(c)   # orientation + axes only
+        m = cv2.moments(c)                              # position = centre of mass
+        x = m["m10"] / m["m00"] if m["m00"] else ex
+        y = m["m01"] / m["m00"] if m["m00"] else ey
         xi, yi = int(round(x)), int(round(y))
         if not (0 <= xi < w and 0 <= yi < h):
-            continue                      # fitted centre outside the image (arc artifact)
+            continue                      # backstop: centroid outside the image
         if mask is not None and mask[yi, xi] == 0:
-            continue                      # centre outside the arena disk
+            continue                      # centroid outside the arena disk
         major = float(max(MA, ma))
         minor = float(min(MA, ma))
         # OpenCV's ellipse angle is measured with a flipped y-axis; the

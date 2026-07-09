@@ -124,15 +124,21 @@ def test_ellipse_centre_outside_mask_is_dropped():
     assert len(_candidates_from_mask(bw, cfg, mask=m1)) == 1   # centre inside mask → kept
 
 
-def test_arc_contour_never_yields_out_of_image_centroid():
-    """cv2.fitEllipse on an arc can place its centre off-image; such candidates
-    (the localsearch arena_01 bug) must be dropped, never returned."""
+def test_candidate_position_is_contour_centroid_not_ellipse_centre():
+    """On a crescent/arc (wall-hugging fly clipped by the mask) the candidate
+    position is the contour centre of mass — inside the blob — not fitEllipse's
+    far-off centre. This recovers the fly instead of dropping the detection."""
     from anytrack.detector import _candidates_from_mask
     cfg = _det_cfg(expected_fly_area_min=5, expected_fly_area_max=100000)
-    bw = np.zeros((200, 200), np.uint8)
-    cv2.ellipse(bw, (100, -150), (220, 220), 0, 55, 125, 255, 4)  # arc of a circle centred above the frame
+    bw = np.zeros((260, 260), np.uint8)
+    cv2.ellipse(bw, (130, 130), (110, 110), 0, 20, 90, 255, 5)   # a thin arc (fitEllipse centre far from it)
+    c = max(cv2.findContours(bw, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0], key=cv2.contourArea)
+    (ex, ey), _, _ = cv2.fitEllipse(c)
+    m = cv2.moments(c); mcx, mcy = m["m10"] / m["m00"], m["m01"] / m["m00"]
+    assert np.hypot(ex - mcx, ey - mcy) > 30             # fitEllipse centre is far from the blob
     cands = _candidates_from_mask(bw, cfg)
-    assert all(0 <= c.x < 200 and 0 <= c.y < 200 for c in cands)  # no centroid outside the image
+    assert len(cands) == 1                               # not dropped
+    assert abs(cands[0].x - mcx) < 1 and abs(cands[0].y - mcy) < 1   # position = moment centroid, not ellipse centre
 
 
 def test_extract_ellipses_masks_blob_outside_arena():
