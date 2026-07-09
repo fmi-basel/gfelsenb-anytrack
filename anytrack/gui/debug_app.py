@@ -196,7 +196,8 @@ def track_roi(video_path, roi: CircleROI, bg: np.ndarray, cfg: AnyTrackConfig,
     tracker = CentroidTracker(center_xy=(roi.r / scale, roi.r / scale),
                               max_jump=max_jump_scaled,
                               miss_tolerance=rcfg.miss_tolerance,
-                              use_kalman=rcfg.use_kalman)
+                              use_kalman=rcfg.use_kalman,
+                              smoothing=getattr(rcfg, "kalman_smoothing", False))
     cap = cv2.VideoCapture(str(video_path))
     n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     fps = cap.get(cv2.CAP_PROP_FPS) or 20.0
@@ -255,7 +256,8 @@ def track_all_rois(video_path, rois: List[CircleROI], bgs: Dict[str, np.ndarray]
             tracker=CentroidTracker(center_xy=(roi.r / scale, roi.r / scale),
                                     max_jump=max_jump_scaled,
                                     miss_tolerance=rcfg.miss_tolerance,
-                                    use_kalman=rcfg.use_kalman))
+                                    use_kalman=rcfg.use_kalman,
+                                    smoothing=getattr(rcfg, "kalman_smoothing", False)))
     cap = cv2.VideoCapture(str(video_path))
     n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     fps = cap.get(cv2.CAP_PROP_FPS) or 20.0

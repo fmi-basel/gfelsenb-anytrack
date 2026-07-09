@@ -71,6 +71,11 @@ class AnyTrackConfig:
     max_jump_px: float = 40.0
     miss_tolerance: int = 15  # frames
     use_kalman: bool = True
+    # Report the Kalman-smoothed posterior as the tracked position. Default OFF:
+    # on a detected frame the RAW contour centroid is reported (the Kalman filter
+    # is still used for prediction/gating), so the output can't lag or cut corners
+    # behind the actual contour on fast moves. Set True for the old smoothed output.
+    kalman_smoothing: bool = False
 
     # Kinematics / scaling
     arena_diameter_mm: float = 75.0

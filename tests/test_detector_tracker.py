@@ -202,6 +202,26 @@ def test_centroid_tracker_assigns_nearest_and_smooths():
     assert tr.misses == 0
 
 
+def test_tracker_reports_raw_centroid_by_default_and_smooths_when_enabled():
+    """Default: the reported position is the raw contour centroid every frame.
+    With smoothing=True the Kalman posterior deviates once velocity builds up."""
+    pts = [(10, 10), (20, 12), (30, 15), (45, 9), (60, 20), (78, 14)]
+
+    tr = CentroidTracker(center_xy=(0, 0), max_jump=100, miss_tolerance=5,
+                         use_kalman=True, smoothing=False)
+    for x, y in pts:
+        chosen, xf, yf = tr.step([_cand(x, y)])
+        assert (xf, yf) == (x, y)          # raw centroid, no Kalman lag
+
+    tr2 = CentroidTracker(center_xy=(0, 0), max_jump=100, miss_tolerance=5,
+                          use_kalman=True, smoothing=True)
+    devs = []
+    for x, y in pts:
+        chosen, xf, yf = tr2.step([_cand(x, y)])
+        devs.append(abs(xf - x) + abs(yf - y))
+    assert max(devs) > 0.5                 # smoothed posterior differs from the measurement
+
+
 def test_centroid_tracker_rejects_far_candidate():
     tr = CentroidTracker(center_xy=(50, 50), max_jump=40, miss_tolerance=5, use_kalman=True)
     tr.step([_cand(50, 50)])          # init near center

@@ -77,7 +77,8 @@ def track_arena_debug(video_path, roi: CircleROI, bg: np.ndarray, cfg: AnyTrackC
     tracker = CentroidTracker(center_xy=(roi.r / scale, roi.r / scale),
                               max_jump=rcfg.max_jump_px / scale,
                               miss_tolerance=rcfg.miss_tolerance,
-                              use_kalman=rcfg.use_kalman)
+                              use_kalman=rcfg.use_kalman,
+                              smoothing=getattr(rcfg, "kalman_smoothing", False))
     cap = cv2.VideoCapture(str(video_path))
     n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     out: List[dict] = []

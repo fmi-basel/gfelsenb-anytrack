@@ -172,6 +172,7 @@ def _track_from_frames(
         max_jump=cfg.max_jump_px * stride / scale,
         miss_tolerance=cfg.miss_tolerance,
         use_kalman=cfg.use_kalman,
+        smoothing=getattr(cfg, "kalman_smoothing", False),
     )
     track = FlyTrack(roi_name=roi.name, track_id=1)
 

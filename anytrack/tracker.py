@@ -77,11 +77,15 @@ class CentroidTracker:
         max_jump: float,
         miss_tolerance: int,
         use_kalman: bool = True,
+        smoothing: bool = False,
     ):
         self.cx, self.cy = center_xy
         self.max_jump = max_jump
         self.miss_tolerance = miss_tolerance
         self.use_kalman = use_kalman
+        # When True, report the Kalman-smoothed posterior; when False (default),
+        # report the raw measured centroid (the filter still predicts, for gating).
+        self.smoothing = smoothing
         self.kf: Optional[Kalman2D] = None
         self.misses = 0
         self.last: Tuple[float, float] = center_xy  # last confirmed position
@@ -102,8 +106,9 @@ class CentroidTracker:
     ) -> Tuple[Optional[EllipseCandidate], Optional[float], Optional[float]]:
         """Advance one frame.
 
-        Returns ``(chosen, x, y)`` where ``x, y`` is the (Kalman-smoothed if
-        enabled) position, or ``(None, None, None)`` when no candidate is
+        Returns ``(chosen, x, y)`` where ``x, y`` is the tracked position — the
+        raw contour centroid by default, or the Kalman-smoothed posterior when
+        ``smoothing`` is set — or ``(None, None, None)`` when no candidate is
         assigned this frame.
         """
         # Lazy init on first frame: seed at the best candidate, else the center.
@@ -150,7 +155,10 @@ class CentroidTracker:
             self.kf = Kalman2D(chosen.x, chosen.y)
             return chosen, chosen.x, chosen.y
         if self.use_kalman:
-            x_f, y_f = self.kf.update(chosen.x, chosen.y)
-        else:
-            x_f, y_f = chosen.x, chosen.y
-        return chosen, x_f, y_f
+            # Keep the filter state current so the next frame's predict() (used for
+            # gating) is meaningful, but report the raw measured centroid unless
+            # smoothing is requested — the posterior lags/cuts corners on fast moves.
+            sx, sy = self.kf.update(chosen.x, chosen.y)
+            if self.smoothing:
+                return chosen, sx, sy
+        return chosen, chosen.x, chosen.y

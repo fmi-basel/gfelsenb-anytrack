@@ -60,6 +60,7 @@ def track_video(
             max_jump=cfg.max_jump_px,
             miss_tolerance=cfg.miss_tolerance,
             use_kalman=cfg.use_kalman,
+            smoothing=getattr(cfg, "kalman_smoothing", False),
         )
 
     cap = cv2.VideoCapture(str(video.video_path))
