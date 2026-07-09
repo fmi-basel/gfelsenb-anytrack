@@ -60,6 +60,20 @@ def test_port_distance_and_columns():
     assert abs(df["dist_to_port_mm"].iloc[1] - 20) < 1.0      # 40 px × 0.5 mm/px
 
 
+def test_shared_radius_gives_constant_size_across_arenas():
+    """Ports of different pixel sizes get a single shared (median) radius."""
+    frame = np.zeros((300, 600), np.uint8)
+    cv2.circle(frame, (150, 150), 100, 200, -1); cv2.circle(frame, (150, 150), 8, 40, -1)
+    cv2.circle(frame, (450, 150), 100, 200, -1); cv2.circle(frame, (450, 150), 13, 40, -1)
+    rois = [CircleROI(name="a1", cx=150, cy=150, r=100),
+            CircleROI(name="a2", cx=450, cy=150, r=100)]
+    ports = detect_ports(frame, rois, AnyTrackConfig())
+    assert set(ports) == {"a1", "a2"}
+    assert abs(ports["a1"].r - ports["a2"].r) < 1e-6      # constant size across arenas
+    # both centres localized correctly despite the shared radius
+    assert abs(ports["a1"].cx - 150) <= 2 and abs(ports["a2"].cx - 450) <= 2
+
+
 def test_sam_backend_falls_back_without_weights(capsys):
     """port_backend='sam' with no checkpoint / package falls back to classical."""
     cfg = AnyTrackConfig(); cfg.port_backend = "sam"; cfg.sam_model_path = ""

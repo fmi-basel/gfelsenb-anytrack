@@ -61,47 +61,75 @@ class SegmentEngine(Protocol):
 
 
 class ClassicalPortDetector:
-    """The port = the compact dark spot nearest the arena centre (no model needed)."""
+    """The port = a small dark disk near the arena centre, of ~constant size.
+
+    Uses both priors instead of a brittle brightness threshold:
+    - *central*: only the window within ``port_max_center_frac``·R of the arena
+      centre is searched, so an off-centre fly can never be taken as the port.
+    - *constant, small size*: a scale-space blob detector (Difference-of-Gaussians
+      over a radius grid ``port_radius_frac_min..max``·R) selects the radius by the
+      scale that best matches a compact dark blob — a principled size, not a
+      threshold-dependent connected-component area. Localization is by the blob
+      response + a darkness-weighted centroid (sub-pixel, threshold-free), and a
+      candidate is accepted only if the mean darkness over the disk clears
+      ``port_darkness_margin`` (an interpretable contrast check).
+
+    (The single shared size across arenas is applied in :func:`detect_ports`.)
+    """
 
     name = "classical"
 
     def __init__(self, cfg):
-        self.margin = int(getattr(cfg, "port_darkness_margin", 15))
-        self.min_area = int(getattr(cfg, "port_min_area", 12))
-        self.max_area = int(getattr(cfg, "port_max_area", 20000))
-        self.max_center_frac = float(getattr(cfg, "port_max_center_frac", 0.30))
+        self.margin = float(getattr(cfg, "port_darkness_margin", 15))
+        self.search_frac = float(getattr(cfg, "port_max_center_frac", 0.30))
+        self.rmin_f = float(getattr(cfg, "port_radius_frac_min", 0.02))
+        self.rmax_f = float(getattr(cfg, "port_radius_frac_max", 0.10))
+        self.n_scales = 12
 
     def detect_port(self, roi_gray, center, radius):
         import cv2
         cx0, cy0 = center
         h, w = roi_gray.shape[:2]
+        f0 = roi_gray.astype(np.float32)
+        # darkness above a smooth local floor (positive at a dark spot)
+        floor = cv2.GaussianBlur(f0, (0, 0), max(3.0, radius / 6.0))
+        dark = np.clip(floor - f0, 0.0, None)
         yy, xx = np.mgrid[0:h, 0:w]
-        disk = (xx - cx0) ** 2 + (yy - cy0) ** 2 <= radius * radius
-        localfloor = cv2.GaussianBlur(roi_gray.astype(np.float32), (0, 0), max(2.0, min(h, w) / 8.0))
-        dark = ((localfloor - roi_gray.astype(np.float32)) > self.margin) & disk
-        if not dark.any():
+        central = (xx - cx0) ** 2 + (yy - cy0) ** 2 <= (self.search_frac * radius) ** 2
+        if not central.any():
             return None
-        ncc, lbl, stats, cent = cv2.connectedComponentsWithStats(dark.astype(np.uint8), 8)
-        best, best_d = None, None
-        for c in range(1, ncc):
-            area = int(stats[c, cv2.CC_STAT_AREA])
-            if not (self.min_area <= area <= self.max_area):
-                continue
-            px, py = cent[c]
-            d = float(np.hypot(px - cx0, py - cy0))
-            if d > self.max_center_frac * radius:      # port must be central
-                continue
-            if best_d is None or d < best_d:
-                best, best_d = c, d
-        if best is None:
+
+        # DoG scale space over a radius grid; pick the (scale, location) with the
+        # strongest compact-blob response inside the central window.
+        radii = np.geomspace(max(2.0, self.rmin_f * radius),
+                             max(3.0, self.rmax_f * radius), self.n_scales)
+        best = None   # (response, radius, y, x)
+        for r in radii:
+            s = float(r) / np.sqrt(2.0)
+            dog = cv2.GaussianBlur(dark, (0, 0), s) - cv2.GaussianBlur(dark, (0, 0), s * 1.6)
+            dog[~central] = -1e18
+            yx = np.unravel_index(int(np.argmax(dog)), dog.shape)
+            resp = float(dog[yx])
+            if best is None or resp > best[0]:
+                best = (resp, float(r), int(yx[0]), int(yx[1]))
+        _, r_sel, cy_pk, cx_pk = best
+
+        # darkness-weighted centroid within the selected disk (sub-pixel centre)
+        disk = (xx - cx_pk) ** 2 + (yy - cy_pk) ** 2 <= r_sel * r_sel
+        wd = dark[disk]
+        contrast = float(wd.mean()) if wd.size else 0.0
+        if contrast < self.margin:                     # no sufficiently dark central spot
             return None
-        area = int(stats[best, cv2.CC_STAT_AREA])
-        px, py = cent[best]
-        mask = (lbl == best)
-        contrast = float((localfloor - roi_gray.astype(np.float32))[mask].mean())
+        wsum = float(wd.sum())
+        if wsum > 0:
+            px = float((xx[disk] * dark[disk]).sum() / wsum)
+            py = float((yy[disk] * dark[disk]).sum() / wsum)
+        else:
+            px, py = float(cx_pk), float(cy_pk)
+        if np.hypot(px - cx0, py - cy0) > self.search_frac * radius:   # centre still central
+            return None
         conf = float(np.clip(contrast / (2 * self.margin), 0.0, 1.0))
-        r = float(np.sqrt(area / np.pi))
-        return float(px), float(py), r, conf, mask
+        return px, py, float(r_sel), conf, disk
 
 
 class SamPortDetector:
@@ -241,13 +269,22 @@ def detect_odor_port(bg_full: np.ndarray, roi: CircleROI, cfg, engine: Optional[
 
 
 def detect_ports(bg_full: np.ndarray, rois: List[CircleROI], cfg) -> Dict[str, PortDetection]:
-    """Detect ports for all ROIs; returns ``{roi_name: PortDetection}`` (found only)."""
+    """Detect ports for all ROIs; returns ``{roi_name: PortDetection}`` (found only).
+
+    Applies the *constant size* prior: when ``port_shared_radius`` is set (default),
+    every detected port's radius is replaced by the median across arenas, so the
+    reported size is consistent instead of varying with each arena's contrast.
+    """
+    import dataclasses
     engine = build_segment_engine(cfg)
     out = {}
     for roi in rois:
         p = detect_odor_port(bg_full, roi, cfg, engine=engine)
         if p is not None:
             out[roi.name] = p
+    if out and getattr(cfg, "port_shared_radius", True):
+        r_shared = float(np.median([p.r for p in out.values()]))
+        out = {n: dataclasses.replace(p, r=r_shared) for n, p in out.items()}
     return out
 
 
