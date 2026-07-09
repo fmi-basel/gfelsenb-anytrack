@@ -141,7 +141,7 @@ def _save_port_overlay(bg_img, ports, rois, dst, stem, *, batch) -> Optional["Pa
     ``<stem>_ports.png``: the grayscale model background with faint arena outlines
     plus, per detected port, a magenta circle (radius = the detected port radius) +
     crosshair + a ``<arena> r=.. c=..`` label. A visual companion to the
-    ``<stem>_ports.json`` record. Returns the path, or None if there is nothing to draw.
+    ``<stem>_rois.json`` record. Returns the path, or None if there is nothing to draw.
     """
     if bg_img is None or not ports:
         return None
@@ -164,6 +164,49 @@ def _save_port_overlay(bg_img, ports, rois, dst, stem, *, batch) -> Optional["Pa
     cv2.imwrite(str(path), vis)
     if not batch:
         ok(f"saved odor-port overlay → {path}")
+    return path
+
+
+def _save_rois_json(dst, stem, video, ports, cfg, bg_img, *, batch) -> Optional["Path"]:
+    """Write ``<stem>_rois.json``: the arena ROI geometry **and** the detected odor
+    port per arena, combined in one file (keyed by arena name). ``port`` is ``null``
+    when none was detected / port detection was off. Written whenever ROIs exist, so
+    the arena geometry is always persisted; the port fields fill in on --detect-port.
+    """
+    if not video.rois:
+        return None
+    import json
+    dst = Path(dst)
+    dst.mkdir(parents=True, exist_ok=True)
+    if bg_img is not None:
+        image_size = [int(bg_img.shape[1]), int(bg_img.shape[0])]
+    elif video.width and video.height:
+        image_size = [int(video.width), int(video.height)]
+    else:
+        image_size = None
+    arenas = {}
+    for r in sorted(video.rois, key=lambda r: r.name):
+        p = (ports or {}).get(r.name)
+        port = None
+        if p is not None:
+            port = p.as_dict()
+            port.pop("roi", None)                        # redundant with the arena key
+        arenas[r.name] = {
+            "roi": {"cx": round(float(r.cx), 2), "cy": round(float(r.cy), 2), "r": round(float(r.r), 2)},
+            "port": port,
+        }
+    doc = {
+        "video": video.video_path.name,
+        "image_size": image_size,
+        "arena_diameter_mm": float(getattr(cfg, "arena_diameter_mm", 0.0)) or None,
+        "arenas": arenas,
+    }
+    path = dst / f"{stem}_rois.json"
+    path.write_text(json.dumps(doc, indent=1))
+    if not batch:
+        n_ports = sum(1 for a in arenas.values() if a["port"] is not None)
+        ok(f"saved {len(arenas)} ROI(s)" + (f" + {n_ports} port(s)" if n_ports else "")
+           + f" → {path}")
     return path
 
 
@@ -292,10 +335,8 @@ def _run_one(video_path, idx: int, n: int, *, args, cfg, single, group=None) -> 
         if bg_flags:            # per-ROI adaptive-model diagnostics (tier / flag)
             import json
             (dst / f"{out.stem}_bg_flags.json").write_text(json.dumps(bg_flags, indent=1))
-        if ports:               # detected odor ports (full-frame px) + overlay PNG
-            import json
-            (dst / f"{out.stem}_ports.json").write_text(
-                json.dumps({n: p.as_dict() for n, p in ports.items()}, indent=1))
+        _save_rois_json(dst, out.stem, video, ports, cfg, bg_img, batch=batch)
+        if ports:               # visual companion overlay when odor ports were found
             _save_port_overlay(bg_img, ports, video.rois, dst, out.stem, batch=batch)
         total = time.perf_counter() - t_video
         if bp is not None:
@@ -345,13 +386,12 @@ def _run_one(video_path, idx: int, n: int, *, args, cfg, single, group=None) -> 
 
     out = _resolve_output_path(args.output, cfg, video)
     fmt = "csv" if out.suffix.lower() == ".csv" else None
-    if ports:                       # add fly-to-port distance + write a port sidecar + overlay PNG
-        import json
+    if ports:                       # add fly-to-port distance columns
         from .odor_port import add_port_distance
         add_port_distance(df, ports, video.rois, cfg)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        (out.parent / f"{out.stem}_ports.json").write_text(
-            json.dumps({n: p.as_dict() for n, p in ports.items()}, indent=1))
+    out.parent.mkdir(parents=True, exist_ok=True)
+    _save_rois_json(out.parent, out.stem, video, ports, cfg, bg_img, batch=batch)
+    if ports:                       # visual companion overlay when odor ports were found
         _save_port_overlay(bg_img, ports, video.rois, out.parent, out.stem, batch=batch)
     write_tracks(df, out, fmt=fmt)
 
@@ -605,8 +645,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                          "else next to the output. Included automatically by --bg-only.")
     ap.add_argument("--detect-port", "--detect_port", dest="detect_port", action="store_true",
                     help="Detect the central odor port per arena (on the model background) "
-                         "and add dist_to_port_px/mm to the tracks + a <stem>_ports.json "
-                         "sidecar. Backend from cfg.port_backend (classical | sam).")
+                         "and add dist_to_port_px/mm to the tracks; the port is recorded per "
+                         "arena in the <stem>_rois.json sidecar (with the arena ROI geometry). "
+                         "Backend from cfg.port_backend (classical | sam).")
     ap.add_argument("--refine-stuck", "--refine_stuck", dest="refine_stuck", action="store_true",
                     help="Two-pass repair: after tracking, re-model + re-track arenas whose fly "
                          "baked into the background (coverage collapsed), filling the fly from "

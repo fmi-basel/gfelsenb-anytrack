@@ -306,6 +306,36 @@ def test_save_port_overlay(tmp_path):
     assert not (tmp_path / "clip2_ports.png").exists()
 
 
+def test_save_rois_json(tmp_path):
+    """_save_rois_json combines arena ROI geometry + odor port (null when none) in one file."""
+    import json
+    from pathlib import Path
+    from anytrack.models import VideoAsset
+    from anytrack.odor_port import PortDetection
+    bg = np.full((200, 200), 180, np.uint8)
+    rois = [CircleROI(name="arena_01", cx=100, cy=100, r=80),
+            CircleROI(name="arena_02", cx=150, cy=100, r=80)]
+    video = VideoAsset(video_path=Path("clip.avi"), timing_csv_path=Path("clip.csv"), rois=rois)
+    ports = {"arena_01": PortDetection(roi="arena_01", cx=101, cy=99, r=12,
+                                       conf=0.8, backend="classical", offset_frac=0.02)}
+    cfg = AnyTrackConfig(); cfg.arena_diameter_mm = 75.0
+    p = run_mod._save_rois_json(tmp_path, "clip", video, ports, cfg, bg, batch=True)
+    assert p == tmp_path / "clip_rois.json"
+    doc = json.loads(p.read_text())
+    assert doc["video"] == "clip.avi" and doc["image_size"] == [200, 200]
+    assert doc["arena_diameter_mm"] == 75.0
+    assert set(doc["arenas"]) == {"arena_01", "arena_02"}
+    a1 = doc["arenas"]["arena_01"]
+    assert a1["roi"] == {"cx": 100.0, "cy": 100.0, "r": 80.0}
+    assert a1["port"]["cx"] == 101 and a1["port"]["conf"] == 0.8
+    assert "roi" not in a1["port"]                       # redundant arena-name key stripped
+    assert doc["arenas"]["arena_02"]["port"] is None     # no port detected in this arena
+    # no ROIs → nothing written
+    empty = VideoAsset(video_path=Path("e.avi"), timing_csv_path=Path("e.csv"), rois=[])
+    assert run_mod._save_rois_json(tmp_path, "e", empty, {}, cfg, bg, batch=True) is None
+    assert not (tmp_path / "e_rois.json").exists()
+
+
 def _fake_roi_bgs(video_path, rois, cfg, fly_masks=None, flags=None, sample_stack=None):
     """Stand-in for build_roi_backgrounds_uniform: flat backgrounds + a small mask."""
     out = {}
