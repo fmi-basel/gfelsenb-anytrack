@@ -51,6 +51,30 @@ def test_format_helpers_do_not_raise(capsys):
     assert "title" in out and "doing thing" in out
 
 
+def test_liveline_shows_per_stage_elapsed_and_eta():
+    """Each thread shows its current stage's elapsed time, plus an ETA once a
+    frame total is known (not for a bare phase-text stage)."""
+    from anytrack.cli_progress import _LiveLine
+    ll = _LiveLine(1, 4, "clip.avi")
+    ll._apply("frames", {"stage": "track", "n": 40, "total": 100})
+    assert "left" in ll.render("|")            # ETA shown when fraction is known
+
+    ll2 = _LiveLine(1, 4, "clip.avi")
+    ll2._set_phase("roi", "detecting ROIs…")     # no frame total → elapsed only
+    out = ll2.render("|")
+    assert "detecting ROIs" in out and "left" not in out
+
+
+def test_batch_group_header_shows_total_and_eta():
+    """The aggregate header reports done/total, elapsed, and a batch ETA."""
+    from anytrack.cli_progress import BatchProgressGroup
+    g = BatchProgressGroup(8)
+    assert "~… left" in g._header()            # no ETA before the first video finishes
+    g._committed = 2
+    h = g._header()
+    assert "2/8" in h and "done" in h and "elapsed" in h and "left" in h
+
+
 def test_name_column_width_fits_full_filename():
     from anytrack.cli_progress import _LiveLine, BatchProgressGroup
     from anytrack.run import _name_col_width

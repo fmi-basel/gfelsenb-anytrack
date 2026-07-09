@@ -232,18 +232,21 @@ class _LiveLine:
         self.fn = 0        # frames processed in the current stage
         self.ftotal = 0    # frames expected (0 → no bar, show phase text)
         self.t0 = _time.monotonic()
+        self.phase_t0 = self.t0   # when the CURRENT stage started (for per-stage elapsed/ETA)
 
     def _set_phase(self, key: str, text: str) -> None:
         self.phase_key = key
         self.phase_text = text
         self.fn = self.ftotal = 0
+        self.phase_t0 = _time.monotonic()   # new stage → restart its clock
 
     def _apply(self, event: str, payload: dict) -> None:
         """Update state from a pipeline event (no rendering)."""
         if event == "frames":
             stage = payload.get("stage")
-            if stage:
+            if stage and stage != self.phase_key:
                 self.phase_key = stage
+                self.phase_t0 = _time.monotonic()   # entered a new stage → restart its clock
             self.fn = int(payload.get("n", 0))
             self.ftotal = int(payload.get("total", 0))
         elif event == "status":
@@ -272,9 +275,16 @@ class _LiveLine:
             phase = f"{label:<10} {color}{_mini_bar(frac, 16)}{_RESET} {int(frac * 100):3d}%"
         else:
             phase = f"{color}{self.phase_text}{_RESET}"
-        clock = _fmt_clock(_time.monotonic() - self.t0)
+        # Per-stage timing: elapsed in the CURRENT stage, plus its ETA when a frame
+        # total is known. Whole-batch total/ETA lives on the group header above.
+        stage_el = _time.monotonic() - self.phase_t0
+        if self.ftotal > 0 and self.fn > 0:
+            eta = stage_el * (self.ftotal - self.fn) / self.fn
+            timing = f"{_fmt_clock(stage_el)} ~{_fmt_clock(eta)} left"
+        else:
+            timing = _fmt_clock(stage_el)
         return (f"{color}{spin_char}{_RESET} {_DIM}[{self.idx}/{self.total}]{_RESET} "
-                f"{name} {phase} {_DIM}{clock}{_RESET}")
+                f"{name} {phase}  {_DIM}{timing}{_RESET}")
 
     def result_line(self, summary: str, ok: bool) -> str:
         color = _ANSI["done"] if ok else _ANSI["error"]
@@ -366,7 +376,9 @@ class BatchProgressGroup:
         self._tty = bool(getattr(sys.stdout, "isatty", lambda: False)())
         self._lock = threading.Lock()
         self._slots: list = []      # active _Slot, in acquisition order
-        self._drawn = 0             # live-region lines currently on screen
+        self._drawn = 0             # live-region lines currently on screen (header + slots)
+        self._t0 = _time.monotonic()  # batch start (for the aggregate elapsed/ETA header)
+        self._committed = 0           # videos finished so far
         self._spin = 0
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -386,6 +398,23 @@ class BatchProgressGroup:
                 self._spin = (self._spin + 1) % len(_SPINNER)
                 self._repaint()
 
+    def _header(self) -> str:
+        """Aggregate line above the per-video threads: batch progress + elapsed + ETA.
+
+        ETA is a throughput estimate — ``elapsed × remaining / committed`` — which
+        already reflects the K-way concurrency, so it needs no per-video model.
+        Unknown until the first video finishes.
+        """
+        el = _time.monotonic() - self._t0
+        parts = [f"{_BOLD}{self._committed}/{self.total}{_RESET} done",
+                 f"{_fmt_clock(el)} elapsed"]
+        if self._committed > 0:
+            eta = el * (self.total - self._committed) / self._committed
+            parts.append(f"~{_fmt_clock(eta)} left")
+        else:
+            parts.append("~… left")
+        return f"{_DIM}batch{_RESET}  " + f" {_DIM}·{_RESET} ".join(parts)
+
     def _repaint(self) -> None:
         """Redraw the whole live region in place (lock held, TTY only)."""
         if not self._tty:
@@ -393,14 +422,20 @@ class BatchProgressGroup:
         if self._drawn:
             sys.stdout.write(f"\033[{self._drawn}A")   # up to the top of the region
         spin = _SPINNER[self._spin]
+        drawn = 0
+        if self._slots:
+            sys.stdout.write(f"\r\033[K{self._header()}\n")   # aggregate line above the threads
+            drawn += 1
         for slot in self._slots:
             sys.stdout.write(f"\r\033[K  {slot.render(spin)}\n")
-        self._drawn = len(self._slots)
+            drawn += 1
+        self._drawn = drawn
         sys.stdout.flush()
 
     def _commit(self, slot: "_Slot", summary: str, ok: bool) -> None:
         """Print a finished video's line as permanent scrollback, drop its slot."""
         with self._lock:
+            self._committed += 1        # feeds the header's progress count + ETA
             line = f"  {slot.result_line(summary, ok)}"
             if not self._tty:
                 print(line)
