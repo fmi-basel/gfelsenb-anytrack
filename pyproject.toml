@@ -1,6 +1,6 @@
 [project]
 name = "anytrack"
-version = "0.2.0"
+version = "0.2.1"
 description = "Modular ROI-based centroid tracking for AVI videos + per-frame timing CSV, with a ttkbootstrap GUI."
 readme = "README.md"
 license = { file = "LICENSE" }
