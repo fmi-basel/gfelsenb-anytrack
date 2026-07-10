@@ -16,3 +16,5 @@ fast_hybrid_tracking_pipeline_plan.md
 
 # MkDocs build output
 /site/
+tools/eval_ports.py
+tools/port_annotator.py
