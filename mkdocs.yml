@@ -1,0 +1,56 @@
+site_name: anytrack
+site_description: Modular ROI-based centroid tracking for behavioural assays
+site_url: https://fmi-basel.github.io/gfelsenb-anytrack/
+repo_url: https://github.com/fmi-basel/gfelsenb-anytrack
+repo_name: fmi-basel/gfelsenb-anytrack
+edit_uri: edit/main/docs/
+copyright: Copyright &copy; 2026 Dennis Goldschmidt, FMI
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: teal
+      accent: teal
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: teal
+      accent: teal
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.sections
+    - navigation.top
+    - toc.follow
+    - content.code.copy
+    - search.suggest
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+
+nav:
+  - Home: index.md
+  - Installation: installation.md
+  - Quickstart: quickstart.md
+  - The pipeline: pipeline.md
+  - CLI reference: cli.md
+  - Configuration: configuration.md
+  - Output formats: outputs.md
+  - GUIs: guis.md
+  - Roadmap: roadmap.md
+  - Development: development.md
