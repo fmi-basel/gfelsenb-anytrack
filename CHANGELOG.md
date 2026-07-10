@@ -4,6 +4,27 @@ All notable changes to **anytrack** are documented here. The project is in **act
 development** and follows [Semantic Versioning](https://semver.org). The `0.x` line
 signals an evolving API/CLI — expect changes between minor versions until `1.0.0`.
 
+## [0.2.1] — 2026-07-10
+
+Documentation and packaging polish. No functional changes to the tracking pipeline.
+
+### Added
+- MIT `LICENSE` and license metadata.
+- A comprehensive documentation site (MkDocs Material), published to GitHub Pages
+  at <https://fmi-basel.github.io/gfelsenb-anytrack/> — installation, quickstart,
+  the pipeline explained, CLI and configuration reference, output formats, GUIs,
+  and a roadmap.
+
+### Changed
+- Rewrote the README (previously a stale "skeleton" stub) for the `0.2.x` line.
+
+### Fixed
+- Stopped tracking the stale `anytrack.egg-info/` build artifact.
+- Removed an unreferenced scratch script (`test_gmm_bg.py`) that shipped inside the
+  installed package.
+
+[0.2.1]: https://github.com/fmi-basel/gfelsenb-anytrack/releases/tag/v0.2.1
+
 ## [0.2.0] — 2026-07-10
 
 First tagged release. The classical, ROI-based centroid-tracking pipeline is
