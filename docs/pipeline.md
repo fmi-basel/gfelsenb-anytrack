@@ -81,10 +81,11 @@ From the trajectory and the **real per-frame time intervals** (timing CSV),
 `anytrack` computes speed (`speed_mm_s`), angular speed (`ang_speed_deg_s`), and
 unwrapped heading — using each arena's px→mm scale (`arena_diameter_mm`).
 
-## 9. Odor-port detection (optional, `--detect-port`) { #odor-port-detection }
+## 9. Odor-port detection (on by default) { #odor-port-detection }
 
-The central odor-delivery port is a low-contrast **dark circular fixture** near the
-arena centre. A **circular-edge matched filter** (strongest mean outward radial
+Runs by default (`port_detect_enabled=true`); set it `false` to skip, or force it
+per-run with `--detect-port`. The central odor-delivery port is a low-contrast
+**dark circular fixture** near the arena centre. A **circular-edge matched filter** (strongest mean outward radial
 gradient) locates it within a central window (`port_max_center_frac`) and a
 constant-size radius band (`port_radius_frac_min/max`), then a shared median radius
 is applied across arenas (`port_shared_radius`). Detection adds
@@ -116,5 +117,5 @@ image crops for downstream pose work.
   (thresholds are auto-rescaled from `detect_params_ref_downscale`); `--stride N`
   tracks every Nth frame and interpolates the rest.
 - **Batch concurrency:** a directory is processed with several videos at once
-  (`--concurrency` / `batch_concurrency`, auto-derived from cores by default) with a
-  live per-video progress display.
+  (`--concurrency` / `batch_concurrency`, **default 4**; set `0` to auto-derive from
+  cores, `1` for sequential) with a live per-video progress display.

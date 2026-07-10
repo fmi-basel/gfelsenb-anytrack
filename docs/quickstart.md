@@ -61,20 +61,17 @@ anytrack run --video clip.avi --qc
 This writes an overlay video, diagnostic plots, per-frame flags, and a bundled
 `qc_report.html`. See [QC report](outputs.md#qc-report).
 
-## Add odor-port detection
+## Odor-port detection (on by default)
 
-For odor-navigation assays, detect the central delivery port per arena and add
-fly→port distance columns:
+Every run detects the central odor-delivery port per arena and adds fly→port
+distance columns (`dist_to_port_*`), plus the port in `<stem>_rois.json` and a
+`<stem>_ports.png` overlay. Disable it with `port_detect_enabled=false` in your
+config; `--detect-port` forces it on for a single run.
 
-```bash
-anytrack run --video clip.avi --detect-port
-```
-
-You can run **only** the port/background stage (no tracking) to check port
-placement quickly:
+Run **only** the background/port stage (no tracking) to check port placement:
 
 ```bash
-anytrack run --video /data/expt/ --bg-only --detect-port
+anytrack run --video /data/expt/ --bg-only
 ```
 
 ## Speed vs. accuracy knobs
@@ -93,6 +90,6 @@ See [Configuration](configuration.md) for what these do and their defaults.
 | One video, defaults | `anytrack run --video clip.avi` |
 | Folder, 3 at a time, with QC | `anytrack run --video /data/ --concurrency 3 --qc` |
 | Inputs check only | `anytrack run --video /data/ --dry-run` |
-| Backgrounds + ports only | `anytrack run --video /data/ --bg-only --detect-port` |
+| Backgrounds + ports only | `anytrack run --video /data/ --bg-only` |
 | One arena only | `anytrack run --video clip.avi --roi arena_02` |
 | Export centroid crops | `anytrack run --video clip.avi --crops` |

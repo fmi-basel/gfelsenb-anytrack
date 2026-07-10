@@ -118,7 +118,7 @@ class AnyTrackConfig:
     qc_low_activity_mm_s: float = 0.05 # QC: flag a ROI low-activity if mean speed is below this (mm/s)
     use_hw_decode: bool = True      # Try hardware-accelerated FFmpeg decode (probed; silent SW fallback if unsupported)
     hw_decode_backend: str = "auto" # auto|videotoolbox|none
-    batch_concurrency: int = 0      # Videos processed at once in batch mode (0 = auto from cores, 1 = sequential)
+    batch_concurrency: int = 4      # Videos processed at once in batch mode (default 4; 0 = auto from cores, 1 = sequential)
     batch_core_budget: int = 0      # Cores to target for batch concurrency (0 = auto: performance cores)
     track_stride: int = 1           # Track every Nth frame; interpolate the rest (1 = every frame). Saves decode+detection
     detect_params_ref_downscale: int = 2  # Reference downscale the area/morph thresholds are tuned for (rescaled at other downscales)
@@ -169,7 +169,7 @@ class AnyTrackConfig:
 
     # Odor-port detection (locate the central odor source per arena; adds fly-to-port
     # distance to the tracks). Detected once per arena on the static model background.
-    port_detect_enabled: bool = False   # run port detection after ROI detection
+    port_detect_enabled: bool = True    # run odor-port detection after ROI detection (default ON; disable to skip)
     port_backend: str = "classical"     # "classical" (central dark disk, no deps) | "sam" (Segment Anything, opt-in)
     port_darkness_margin: int = 15      # (legacy) gray levels a port pixel must be below the local floor
     port_edge_min: float = 4.0          # min mean radial-gradient response (gray/px) to accept a circular port
