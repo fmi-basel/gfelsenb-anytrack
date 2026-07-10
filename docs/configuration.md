@@ -77,14 +77,14 @@ The tables below list the most useful settings with their defaults. Run
 | `track_stride` | `1` | Track every Nth frame; interpolate the rest. |
 | `use_hw_decode` / `hw_decode_backend` | `true` / `"auto"` | Hardware decode (probed). |
 | `use_hw_encode` | `true` | Hardware encode where applicable. |
-| `batch_concurrency` | `0` | Videos at once in batch (`0` = auto from cores, `1` = sequential). |
+| `batch_concurrency` | `4` | Videos at once in batch (`0` = auto from cores, `1` = sequential). |
 | `batch_core_budget` | `0` | Cores to target for batch (`0` = auto). |
 
 ## Odor-port detection
 
 | Key | Default | Meaning |
 |-----|---------|---------|
-| `port_detect_enabled` | `false` | Run port detection (or use `--detect-port`). |
+| `port_detect_enabled` | `true` | Run odor-port detection (default ON; set `false` to skip, or force per-run with `--detect-port`). |
 | `port_backend` | `"classical"` | `classical` (edge matched filter) or `sam`. |
 | `port_edge_min` | `4.0` | Min mean radial-gradient response to accept a port. |
 | `port_max_center_frac` | `0.30` | Port centre must be within this fraction of R from the arena centre. |

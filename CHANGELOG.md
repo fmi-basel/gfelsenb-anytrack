@@ -4,18 +4,26 @@ All notable changes to **anytrack** are documented here. The project is in **act
 development** and follows [Semantic Versioning](https://semver.org). The `0.x` line
 signals an evolving API/CLI — expect changes between minor versions until `1.0.0`.
 
-## [Unreleased]
+## [0.2.1] — 2026-07-10
+
+Documentation, packaging, and default-configuration polish on top of v0.2.0. The
+tracking algorithms are unchanged; three shipped **defaults** now match the
+validated setup.
 
 ### Changed
 - **Kalman filtering is now OFF by default** (`use_kalman=false`). Linking gates on
   the last confirmed position (nearest candidate within `max_jump_px`, widened while
   a track is lost) and reports the raw contour centroid. A constant-velocity Kalman
   prediction overshoots on the fast turns of a walking fly, so it is now opt-in
-  (`use_kalman=true`); this makes the shipped default match the validated setup.
-
-## [0.2.1] — 2026-07-10
-
-Documentation and packaging polish. No functional changes to the tracking pipeline.
+  (`use_kalman=true`).
+- **Odor-port detection is now ON by default** (`port_detect_enabled=true`). Every
+  run detects the port per arena, adds `dist_to_port_px`/`dist_to_port_mm`, and
+  records the port in `<stem>_rois.json` (+ a `<stem>_ports.png` overlay). Set
+  `false` to skip.
+- **Batch concurrency now defaults to 4** (`batch_concurrency=4`): a directory runs
+  four videos at once. Set `0` to auto-derive from cores, `1` for sequential, or
+  override per-run with `--concurrency`.
+- Rewrote the README (previously a stale "skeleton" stub) for the `0.2.x` line.
 
 ### Added
 - MIT `LICENSE` and license metadata.
@@ -23,9 +31,6 @@ Documentation and packaging polish. No functional changes to the tracking pipeli
   at <https://fmi-basel.github.io/gfelsenb-anytrack/> — installation, quickstart,
   the pipeline explained, CLI and configuration reference, output formats, GUIs,
   and a roadmap.
-
-### Changed
-- Rewrote the README (previously a stale "skeleton" stub) for the `0.2.x` line.
 
 ### Fixed
 - Stopped tracking the stale `anytrack.egg-info/` build artifact.
