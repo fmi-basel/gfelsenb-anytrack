@@ -35,6 +35,8 @@ jobs:
       - run: pip install mkdocs-material
       - run: mkdocs build --strict
       - uses: actions/configure-pages@v5
+        with:
+          enablement: true   # create/enable the Pages site (GitHub Actions source) if it isn't yet
       - uses: actions/upload-pages-artifact@v3
         with:
           path: site
