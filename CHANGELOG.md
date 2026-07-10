@@ -4,6 +4,15 @@ All notable changes to **anytrack** are documented here. The project is in **act
 development** and follows [Semantic Versioning](https://semver.org). The `0.x` line
 signals an evolving API/CLI — expect changes between minor versions until `1.0.0`.
 
+## [Unreleased]
+
+### Changed
+- **Kalman filtering is now OFF by default** (`use_kalman=false`). Linking gates on
+  the last confirmed position (nearest candidate within `max_jump_px`, widened while
+  a track is lost) and reports the raw contour centroid. A constant-velocity Kalman
+  prediction overshoots on the fast turns of a walking fly, so it is now opt-in
+  (`use_kalman=true`); this makes the shipped default match the validated setup.
+
 ## [0.2.1] — 2026-07-10
 
 Documentation and packaging polish. No functional changes to the tracking pipeline.
