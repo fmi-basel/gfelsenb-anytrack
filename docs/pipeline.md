@@ -62,14 +62,18 @@ Per arena, per frame:
 
 A per-arena `CentroidTracker` links detections into a trajectory:
 
-- a **Kalman filter** predicts the next position,
-- candidates are matched greedily to the prediction within an **acceptance gate**
-  (`max_jump_px`),
+- each frame the fly is matched to the **nearest candidate** within an **acceptance
+  gate** centered on the last confirmed position (`max_jump_px`),
+- the gate **widens while a track is lost** so a brief fast move is re-acquired
+  within a couple of frames,
 - short gaps are tolerated (`miss_tolerance`).
 
-The **reported position is the raw contour centroid**; the Kalman estimate is used
-for gating/prediction (not written), which keeps positions faithful on fast turns.
-Set `kalman_smoothing=true` to report the smoothed estimate instead.
+The **reported position is the raw contour centroid**. By default the Kalman filter
+is **off** (`use_kalman=false`) — on the fast turns typical of a walking fly, a
+constant-velocity Kalman prediction tends to overshoot, so gating on the last
+confirmed position tracks more faithfully. Set `use_kalman=true` to gate on the
+Kalman prediction instead, and `kalman_smoothing=true` to additionally report the
+smoothed posterior rather than the raw centroid.
 
 ## 8. Kinematics
 

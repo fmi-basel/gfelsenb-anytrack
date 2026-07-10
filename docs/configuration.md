@@ -48,10 +48,10 @@ The tables below list the most useful settings with their defaults. Run
 
 | Key | Default | Meaning |
 |-----|---------|---------|
-| `max_jump_px` | `40.0` | Acceptance-gate radius around the prediction. |
+| `max_jump_px` | `40.0` | Acceptance-gate radius (widened while a track is lost). |
 | `miss_tolerance` | `15` | Frames a track survives without a detection. |
-| `use_kalman` | `true` | Kalman prediction/gating. |
-| `kalman_smoothing` | `false` | Report the smoothed estimate instead of the raw centroid. |
+| `use_kalman` | `false` | Off (default): gate on the last confirmed position. On: gate on a constant-velocity Kalman prediction (overshoots on fast turns). |
+| `kalman_smoothing` | `false` | Report the Kalman-smoothed posterior instead of the raw centroid (only with `use_kalman=true`). |
 | `arena_diameter_mm` | `75.0` | Arena diameter → px→mm scale for kinematics. |
 
 ## Per-ROI background model

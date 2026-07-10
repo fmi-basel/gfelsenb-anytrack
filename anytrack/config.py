@@ -70,8 +70,14 @@ class AnyTrackConfig:
     # Kalman / linking
     max_jump_px: float = 40.0
     miss_tolerance: int = 15  # frames
-    use_kalman: bool = True
-    # Report the Kalman-smoothed posterior as the tracked position. Default OFF:
+    # Kalman prediction for the acceptance gate. Default OFF: the gate is centered
+    # on the last confirmed position (nearest-neighbor within max_jump_px, widened
+    # while lost). On (True) centers the gate on a constant-velocity Kalman
+    # prediction — but that overshoots on the fast turns typical of a walking fly,
+    # so it is opt-in. Reported position is the raw centroid either way.
+    use_kalman: bool = False
+    # Report the Kalman-smoothed posterior as the tracked position (only meaningful
+    # with use_kalman=True). Default OFF:
     # on a detected frame the RAW contour centroid is reported (the Kalman filter
     # is still used for prediction/gating), so the output can't lag or cut corners
     # behind the actual contour on fast moves. Set True for the old smoothed output.
