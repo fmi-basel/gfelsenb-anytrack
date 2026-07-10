@@ -1,9 +1,16 @@
 [project]
 name = "anytrack"
-version = "0.1.0"
+version = "0.2.0"
 description = "Modular ROI-based centroid tracking for AVI videos + per-frame timing CSV, with a ttkbootstrap GUI."
 readme = "README.md"
 requires-python = ">=3.10"
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "Topic :: Scientific/Engineering :: Image Recognition",
+  "Programming Language :: Python :: 3",
+  "Operating System :: OS Independent",
+]
 dependencies = [
   "numpy>=1.24",
   "pandas>=2.0",
@@ -17,6 +24,11 @@ dependencies = [
   "pyarrow>=22.0.0",
   "scikit-learn>=1.7.2",
 ]
+
+[project.urls]
+Homepage = "https://github.com/fmi-basel/gfelsenb-anytrack"
+Repository = "https://github.com/fmi-basel/gfelsenb-anytrack"
+Changelog = "https://github.com/fmi-basel/gfelsenb-anytrack/blob/main/CHANGELOG.md"
 
 [project.scripts]
 anytrack = "anytrack.dispatch:main"
