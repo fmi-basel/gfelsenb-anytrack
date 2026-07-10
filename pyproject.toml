@@ -3,10 +3,12 @@ name = "anytrack"
 version = "0.2.0"
 description = "Modular ROI-based centroid tracking for AVI videos + per-frame timing CSV, with a ttkbootstrap GUI."
 readme = "README.md"
+license = { file = "LICENSE" }
 requires-python = ">=3.10"
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
   "Topic :: Scientific/Engineering :: Image Recognition",
   "Programming Language :: Python :: 3",
   "Operating System :: OS Independent",
@@ -63,6 +65,13 @@ pose = [
 #   uv pip install 'anytrack[sam]'  (plus a SAM checkpoint via cfg.sam_model_path)
 sam = [
   "segment-anything>=1.0",
+]
+
+# Documentation site (MkDocs + Material). Build with `mkdocs build`, preview with
+# `mkdocs serve`. Not needed at runtime.
+#   uv pip install 'anytrack[docs]'
+docs = [
+  "mkdocs-material>=9.5",
 ]
 
 [build-system]
