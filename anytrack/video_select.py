@@ -15,6 +15,11 @@ from typing import Callable, List, Tuple
 
 VIDEO_EXTS = (".avi", ".mp4", ".mov", ".mkv", ".m4v")
 
+# Frames decode but the container reports 0 frames: an unfinalized recording
+# (interrupted recorder, no index). Seeking in such files silently lands on
+# frame 0, so they must be remuxed before processing, not merely let through.
+UNINDEXED_REASON = "unindexed — needs remux"
+
 # validator(path) -> (ok, reason). reason is shown next to the video either way.
 Validator = Callable[[Path], Tuple[bool, str]]
 
@@ -36,11 +41,12 @@ def validate_openable(path) -> Tuple[bool, str]:
     cap = cv2.VideoCapture(str(p))
     ok = cap.isOpened()
     n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) if ok else 0
+    decodes = ok and n <= 0 and cap.read()[0]
     cap.release()
     if not ok:
         return False, "cannot open"
     if n <= 0:
-        return False, "0 frames"
+        return False, UNINDEXED_REASON if decodes else "0 frames"
     return True, f"{n} frames"
 
 
@@ -151,6 +157,7 @@ def resolve_videos(path, validator: Validator = validate_openable) -> List[Path]
 
     valid: List[Path] = []
     labels: List[str] = []
+    unindexed: List[Path] = []
     print(f"found {len(found)} video(s) in {p}:")
     for v in found:
         ok, reason = validator(v)
@@ -158,6 +165,18 @@ def resolve_videos(path, validator: Validator = validate_openable) -> List[Path]
         if ok:
             valid.append(v)
             labels.append(v.name)
+        elif reason == UNINDEXED_REASON:
+            unindexed.append(v)
+    if unindexed:
+        print(
+            "\nhint: the unindexed video(s) look like unfinalized recordings (the\n"
+            "recorder was interrupted before writing the AVI index). The frames are\n"
+            "intact; rebuild the index losslessly with ffmpeg, then rerun:\n"
+        )
+        for v in unindexed:
+            fixed = v.with_suffix(".fixed" + v.suffix)
+            print(f"  ffmpeg -i {v} -c copy {fixed} && mv {fixed} {v}")
+        print()
     if not valid:
         print("no valid videos to process.")
         return []

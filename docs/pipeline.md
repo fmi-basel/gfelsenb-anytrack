@@ -16,6 +16,12 @@ video is paired with its timing CSV, and the inputs are validated (readable vide
 decodable first frame, well-formed CSV). The **effective configuration** is printed
 so every run is self-documenting. `--dry-run` stops here.
 
+A video whose frames decode but whose container reports **0 frames** is flagged
+`unindexed — needs remux`: an unfinalized recording (the recorder was interrupted
+before writing the AVI index). Seeking in such files silently lands on frame 0, so
+they are rejected and a copy-pasteable lossless `ffmpeg -c copy` fix is printed
+for each affected file.
+
 ## 4. ROI (arena) detection
 
 A model background image is built for the whole frame and **Hough circles** locate
